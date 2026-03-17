@@ -1,0 +1,18 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Job Market Intelligence minimal resources (optional IaC)
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Globally unique S3 bucket name for the data lake
+
+Resources:
+  DataLakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+
+Outputs:
+  BucketName:
+    Value: !Ref DataLakeBucket
+

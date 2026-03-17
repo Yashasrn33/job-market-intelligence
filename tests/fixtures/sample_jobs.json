@@ -1,0 +1,26 @@
+[
+  {
+    "job_id": "abc123",
+    "source": "adzuna",
+    "title": "Software Engineer",
+    "company": "ExampleCo",
+    "description": "We use Python, AWS, Docker and Kubernetes daily. Experience with React preferred.",
+    "location": {"display_name": "New York, NY", "area": ["US", "New York"], "country": "US"},
+    "salary": {"min": 120000, "max": 160000, "currency": "USD", "is_predicted": false},
+    "posted_date": "2026-03-15T00:00:00Z",
+    "url": "https://example.com/job/1",
+    "ingested_at": "2026-03-16T00:00:00Z"
+  },
+  {
+    "job_id": "def456",
+    "source": "adzuna",
+    "title": "Data Scientist",
+    "company": "DataCorp",
+    "description": "Machine learning role. Must know Python, SQL, TensorFlow and PyTorch.",
+    "location": {"display_name": "London", "area": ["UK", "London"], "country": "GB"},
+    "salary": {"min": 80000, "max": 110000, "currency": "GBP", "is_predicted": true},
+    "posted_date": "2026-03-14T00:00:00Z",
+    "url": "https://example.com/job/2",
+    "ingested_at": "2026-03-16T00:00:00Z"
+  }
+]
