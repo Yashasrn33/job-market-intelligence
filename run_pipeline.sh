@@ -1,5 +1,9 @@
 #!/bin/bash
 # run_pipeline.sh - Execute the full data pipeline end to end
+#
+# Usage:
+#   bash run_pipeline.sh             # ingest + ETL + Athena only
+#   bash run_pipeline.sh --with-ml   # also runs ML feature gen + training
 set -euo pipefail
 
 if [[ -f .env ]]; then
@@ -8,14 +12,18 @@ fi
 
 BUCKET_NAME="${S3_BUCKET:?Set S3_BUCKET in .env or export it}"
 REGION="${AWS_REGION:-us-east-1}"
+WITH_ML="${1:-}"
+
+TOTAL_STEPS=4
+[[ "${WITH_ML}" == "--with-ml" ]] && TOTAL_STEPS=5
 
 echo "============================================"
 echo "  Running Job Market Intelligence Pipeline"
 echo "============================================"
 
-# ── Step 1: Invoke Lambda scraper ──
+# ── Step 1: Invoke Lambda scraper ──────────────────────────────────────────
 echo ""
-echo "Step 1/4: Collecting jobs from Adzuna..."
+echo "Step 1/${TOTAL_STEPS}: Collecting jobs from Adzuna..."
 aws lambda invoke \
   --function-name job-market-scraper \
   --payload '{}' \
@@ -26,9 +34,12 @@ echo "  Lambda result:"
 cat output.json
 echo ""
 
-# ── Step 2: Run Glue ETL ──
-echo "Step 2/4: Processing data with Glue ETL..."
-RUN_ID=$(aws glue start-job-run --job-name job-market-etl --query 'JobRunId' --output text --region "${REGION}")
+# ── Step 2: Run Glue ETL ──────────────────────────────────────────────────
+echo "Step 2/${TOTAL_STEPS}: Processing data with Glue ETL..."
+RUN_ID=$(aws glue start-job-run \
+  --job-name job-market-etl \
+  --query 'JobRunId' --output text \
+  --region "${REGION}")
 echo "  Job run ID: ${RUN_ID}"
 
 echo "  Waiting for Glue job to complete..."
@@ -51,9 +62,9 @@ if [[ "${STATUS}" != "SUCCEEDED" ]]; then
   exit 1
 fi
 
-# ── Step 3: Repair Athena partitions ──
+# ── Step 3: Repair Athena partitions ───────────────────────────────────────
 echo ""
-echo "Step 3/4: Updating Athena partitions..."
+echo "Step 3/${TOTAL_STEPS}: Updating Athena partitions..."
 for table in jobs job_skills; do
   aws athena start-query-execution \
     --query-string "MSCK REPAIR TABLE job_market_db.${table}" \
@@ -62,8 +73,8 @@ for table in jobs job_skills; do
 done
 sleep 10
 
-# ── Step 4: Smoke-test query ──
-echo "Step 4/4: Running test query..."
+# ── Step 4: Smoke-test query ──────────────────────────────────────────────
+echo "Step 4/${TOTAL_STEPS}: Running test query..."
 QUERY_ID=$(aws athena start-query-execution \
   --query-string "SELECT skill, COUNT(*) as cnt FROM job_market_db.job_skills GROUP BY skill ORDER BY cnt DESC LIMIT 10" \
   --result-configuration "OutputLocation=s3://${BUCKET_NAME}/athena-results/" \
@@ -71,10 +82,19 @@ QUERY_ID=$(aws athena start-query-execution \
   --query 'QueryExecutionId' --output text)
 
 sleep 5
-aws athena get-query-results --query-execution-id "${QUERY_ID}" --region "${REGION}" 2>/dev/null \
+aws athena get-query-results \
+  --query-execution-id "${QUERY_ID}" \
+  --region "${REGION}" 2>/dev/null \
   || echo "  (query still running -- check Athena console)"
 
 rm -f output.json
+
+# ── Step 5 (optional): ML training ────────────────────────────────────────
+if [[ "${WITH_ML}" == "--with-ml" ]]; then
+  echo ""
+  echo "Step 5/${TOTAL_STEPS}: Running ML pipeline (feature gen + training)..."
+  bash infrastructure/deploy_ml.sh
+fi
 
 echo ""
 echo "============================================"
@@ -84,3 +104,4 @@ echo ""
 echo "  View data  : aws s3 ls s3://${BUCKET_NAME}/processed/ --recursive"
 echo "  Athena UI  : https://console.aws.amazon.com/athena"
 echo "  Dashboard  : cd visualization/streamlit_app && streamlit run app.py"
+[[ "${WITH_ML}" != "--with-ml" ]] && echo "  ML training : bash run_pipeline.sh --with-ml"

@@ -11,6 +11,18 @@ if [[ -z "${BUCKET_NAME}" ]]; then
   echo "Generated bucket name: ${BUCKET_NAME}"
 fi
 
+# Persist to .env so downstream scripts (deploy_lambda, deploy_glue) pick it up
+if [[ -f .env ]]; then
+  if grep -q '^S3_BUCKET=' .env; then
+    sed -i.bak "s|^S3_BUCKET=.*|S3_BUCKET=${BUCKET_NAME}|" .env && rm -f .env.bak
+  else
+    echo "S3_BUCKET=${BUCKET_NAME}" >> .env
+  fi
+else
+  echo "S3_BUCKET=${BUCKET_NAME}" > .env
+fi
+export S3_BUCKET="${BUCKET_NAME}"
+
 echo "=== Setting up AWS resources in ${REGION} ==="
 
 # --- S3 Bucket ---

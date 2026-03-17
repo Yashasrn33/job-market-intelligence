@@ -2,18 +2,22 @@
 # One-click AWS setup: infrastructure + Lambda + Glue
 set -euo pipefail
 
+_source_env() {
+  if [[ -f .env ]]; then set -a; source .env; set +a; fi
+}
+
 echo "============================================"
 echo "  Job Market Intelligence - AWS Setup"
 echo "============================================"
 
-# Source .env if present
-if [[ -f .env ]]; then
-  set -a; source .env; set +a
-fi
+_source_env
 
 echo ""
 echo "Step 1/3: AWS infrastructure (S3, IAM, Secrets, Glue DB, tables)"
 bash infrastructure/setup_aws.sh
+
+# Re-source .env because setup_aws.sh may have generated a new bucket name
+_source_env
 
 echo ""
 echo "Step 2/3: Deploy Lambda scraper"
@@ -36,5 +40,8 @@ echo ""
 echo "  2. Run the pipeline:"
 echo "     bash run_pipeline.sh"
 echo ""
-echo "  3. Launch the dashboard:"
+echo "  3. Deploy ML models (optional):"
+echo "     bash infrastructure/deploy_ml.sh"
+echo ""
+echo "  4. Launch the dashboard:"
 echo "     cd visualization/streamlit_app && streamlit run app.py"
