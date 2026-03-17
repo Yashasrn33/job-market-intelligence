@@ -3,18 +3,24 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import awswrangler as wr
+import boto3
 import os
 
 st.set_page_config(page_title="Skill Trends", layout="wide")
 
 DATABASE = os.getenv('GLUE_DATABASE', 'job_market_db')
 REGION = os.getenv('AWS_REGION', 'us-east-1')
+BOTO3_SESSION = boto3.Session(region_name=REGION)
 
 
 @st.cache_data(ttl=3600)
 def run_query(query):
     try:
-        return wr.athena.read_sql_query(query, database=DATABASE, region_name=REGION)
+        return wr.athena.read_sql_query(
+            query,
+            database=DATABASE,
+            boto3_session=BOTO3_SESSION,
+        )
     except Exception as e:
         st.error(f"Query error: {e}")
         return pd.DataFrame()
@@ -26,7 +32,7 @@ query = """
 SELECT skill, year, month, COUNT(*) as job_count
 FROM job_market_db.job_skills
 GROUP BY skill, year, month
-ORDER BY year, month
+ORDER BY year, month;
 """
 df = run_query(query)
 
@@ -38,9 +44,10 @@ if not df.empty:
         df.groupby('skill')['job_count'].sum()
         .nlargest(10).index.tolist()
     )
-    filtered = df[df['skill'].isin(top_skills)]
+    filtered = df[df['skill'].isin(top_skills)].sort_values(["skill", "year", "month"])
     fig = px.line(
         filtered, x='period', y='job_count', color='skill',
+        markers=True,
         labels={'period': 'Month', 'job_count': 'Job Postings'},
     )
     fig.update_layout(height=500)

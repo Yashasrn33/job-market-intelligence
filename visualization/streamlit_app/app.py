@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import List
 
 import awswrangler as wr
+import boto3
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -42,6 +43,7 @@ st.markdown(
 
 DATABASE = os.getenv("GLUE_DATABASE", "job_market_db")
 REGION = os.getenv("AWS_REGION", "us-east-1")
+BOTO3_SESSION = boto3.Session(region_name=REGION)
 
 # ── query helpers ───────────────────────────────────────────────────────────
 
@@ -49,7 +51,11 @@ REGION = os.getenv("AWS_REGION", "us-east-1")
 @st.cache_data(ttl=3600)
 def run_query(query: str) -> pd.DataFrame:
     try:
-        return wr.athena.read_sql_query(query, database=DATABASE, region_name=REGION)
+        return wr.athena.read_sql_query(
+            query,
+            database=DATABASE,
+            boto3_session=BOTO3_SESSION,
+        )
     except Exception as exc:
         st.error(f"Query error: {exc}")
         return pd.DataFrame()

@@ -3,18 +3,24 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import awswrangler as wr
+import boto3
 import os
 
 st.set_page_config(page_title="Salary Map", layout="wide")
 
 DATABASE = os.getenv('GLUE_DATABASE', 'job_market_db')
 REGION = os.getenv('AWS_REGION', 'us-east-1')
+BOTO3_SESSION = boto3.Session(region_name=REGION)
 
 
 @st.cache_data(ttl=3600)
 def run_query(query):
     try:
-        return wr.athena.read_sql_query(query, database=DATABASE, region_name=REGION)
+        return wr.athena.read_sql_query(
+            query,
+            database=DATABASE,
+            boto3_session=BOTO3_SESSION,
+        )
     except Exception as e:
         st.error(f"Query error: {e}")
         return pd.DataFrame()
