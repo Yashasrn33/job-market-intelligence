@@ -14,7 +14,7 @@ Features created:
 """
 
 import logging
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -58,6 +58,89 @@ class SkillFeatureEngineer:
             "Loaded %d records for %d skills", len(df), df["skill"].nunique()
         )
         return df
+
+    def load_skill_data_from_s3(
+        self,
+        bucket: str,
+        data_source: str = "combined",
+    ) -> pd.DataFrame:
+        """
+        Load raw job_skills data from S3 parquet and aggregate to weekly level.
+
+        Tries Athena first, falls back to direct S3 parquet reads.
+
+        Args:
+            bucket: S3 bucket name.
+            data_source: 'kaggle', 'adzuna', or 'combined'.
+        """
+        paths = {
+            "kaggle": [f"s3://{bucket}/processed/job_skills_kaggle/"],
+            "adzuna": [f"s3://{bucket}/processed/job_skills/"],
+            "combined": [
+                f"s3://{bucket}/processed/job_skills/",
+                f"s3://{bucket}/processed/job_skills_kaggle/",
+            ],
+        }
+
+        if data_source not in paths:
+            raise ValueError(
+                f"Unknown data_source '{data_source}'. "
+                f"Choose from: {list(paths.keys())}"
+            )
+
+        frames: list[pd.DataFrame] = []
+        for path in paths[data_source]:
+            try:
+                df = wr.s3.read_parquet(path)
+                frames.append(df)
+                logger.info("Loaded %d records from %s", len(df), path)
+            except Exception as exc:
+                logger.warning("Could not read %s: %s", path, exc)
+
+        if not frames:
+            raise RuntimeError(
+                f"No data found for source '{data_source}' in bucket '{bucket}'"
+            )
+
+        raw = pd.concat(frames, ignore_index=True)
+        return self._aggregate_to_weekly(raw)
+
+    @staticmethod
+    def _aggregate_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
+        """Aggregate raw job_skills rows to weekly skill counts."""
+        df = df.copy()
+        df["posted_date"] = pd.to_datetime(df["posted_date"], errors="coerce")
+        df = df.dropna(subset=["posted_date"])
+
+        df["week"] = df["posted_date"].dt.to_period("W").dt.start_time
+
+        salary_col = (
+            "salary_mid_usd" if "salary_mid_usd" in df.columns
+            else "salary_mid" if "salary_mid" in df.columns
+            else None
+        )
+
+        agg_dict: dict = {}
+        if "job_id" in df.columns:
+            agg_dict["job_id"] = "count"
+        else:
+            agg_dict["skill"] = "count"
+
+        if salary_col:
+            agg_dict[salary_col] = "mean"
+
+        grouped = df.groupby(["skill", "week", "country"]).agg(agg_dict).reset_index()
+
+        count_col = "job_id" if "job_id" in agg_dict else "skill"
+        grouped = grouped.rename(columns={count_col: "job_count"})
+
+        if salary_col and salary_col != "avg_salary":
+            grouped = grouped.rename(columns={salary_col: "avg_salary"})
+
+        if "avg_salary" not in grouped.columns:
+            grouped["avg_salary"] = np.nan
+
+        return grouped
 
     # ── feature blocks ──────────────────────────────────────────────────────
 
@@ -284,13 +367,17 @@ class SkillFeatureEngineer:
     ]
 
     def prepare_training_data(
-        self, target_horizon: int = 4
+        self,
+        target_horizon: int = 4,
+        raw_df: Optional[pd.DataFrame] = None,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Full pipeline: load → engineer features → create target.
 
         Args:
             target_horizon: weeks ahead to predict.
+            raw_df: optional pre-loaded weekly aggregated data. When provided
+                the Athena load step is skipped.
 
         Returns:
             (features_df, target_df) ready for model training.
@@ -298,7 +385,15 @@ class SkillFeatureEngineer:
 
         logger.info("Starting feature engineering pipeline…")
 
-        df = self.load_skill_data(lookback_weeks=52)
+        if raw_df is not None:
+            df = raw_df.copy()
+            logger.info(
+                "Using provided DataFrame: %d records, %d skills",
+                len(df),
+                df["skill"].nunique(),
+            )
+        else:
+            df = self.load_skill_data(lookback_weeks=52)
 
         logger.info("Creating time features…")
         df = self.create_time_features(df)
@@ -343,12 +438,42 @@ class SkillFeatureEngineer:
 
         return features_df, target_df
 
+    def prepare_training_data_from_s3(
+        self,
+        bucket: str,
+        data_source: str = "combined",
+        target_horizon: int = 4,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        End-to-end: load raw job_skills from S3, engineer features, create target.
+
+        Args:
+            bucket: S3 bucket name.
+            data_source: 'kaggle', 'adzuna', or 'combined'.
+            target_horizon: weeks ahead to predict.
+
+        Returns:
+            (features_df, target_df) ready for model training.
+        """
+        raw_df = self.load_skill_data_from_s3(bucket, data_source)
+        return self.prepare_training_data(
+            target_horizon=target_horizon, raw_df=raw_df
+        )
+
     def save_features(
-        self, bucket: str, prefix: str = "ml/features"
+        self,
+        bucket: str,
+        prefix: str = "ml/features",
+        data_source: Optional[str] = None,
     ) -> str:
         """Save engineered features to S3 as Parquet."""
 
-        features_df, target_df = self.prepare_training_data()
+        if data_source:
+            features_df, target_df = self.prepare_training_data_from_s3(
+                bucket, data_source
+            )
+        else:
+            features_df, target_df = self.prepare_training_data()
 
         training_data = features_df.merge(target_df, on=["skill", "week"])
 

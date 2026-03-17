@@ -6,8 +6,11 @@ Models trained:
 2. Isolation Forest - Emerging skill detector
 3. KMeans        - Skill clustering
 
-Usage (local):
+Usage (local — from parquet):
     python -m ml.training.train --train data/training_data.parquet --model-dir ml/models
+
+Usage (local — from S3):
+    python -m ml.training.train --bucket my-bucket --data-source kaggle --model-dir ml/models
 
 Usage (SageMaker):
     Automatically receives --train, --model-dir, --output-data-dir via SM env vars.
@@ -18,10 +21,12 @@ import json
 import logging
 import os
 import pickle
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+import awswrangler as wr
 from sklearn.cluster import KMeans
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -275,6 +280,81 @@ class SkillDemandForecaster:
 
         return forecaster
 
+    # ── S3 integration ──────────────────────────────────────────────────────
+
+    def upload_to_s3(self, model_dir: str, bucket: str) -> str:
+        """Upload all model artifacts from *model_dir* to S3."""
+        s3_prefix = f"s3://{bucket}/models/skill_forecaster/"
+
+        for fpath in Path(model_dir).glob("*"):
+            if fpath.is_file():
+                wr.s3.upload(
+                    local_file=str(fpath),
+                    path=f"{s3_prefix}{fpath.name}",
+                )
+
+        logger.info("Models uploaded to %s", s3_prefix)
+        return s3_prefix
+
+    @classmethod
+    def train_from_s3(
+        cls,
+        bucket: str,
+        data_source: str = "combined",
+        database: str = "job_market_db",
+        region: str = "us-east-1",
+        model_dir: str = "ml/models",
+        upload_s3: bool = False,
+    ) -> "SkillDemandForecaster":
+        """
+        End-to-end pipeline: load from S3 → feature engineering → train → save.
+
+        Args:
+            bucket: S3 bucket name.
+            data_source: 'kaggle', 'adzuna', or 'combined'.
+            database: Glue catalog database name.
+            region: AWS region.
+            model_dir: local directory for saving model artifacts.
+            upload_s3: whether to also push artifacts to S3.
+
+        Returns:
+            Trained SkillDemandForecaster instance.
+        """
+        from ml.training.feature_engineering import SkillFeatureEngineer
+
+        logger.info("=" * 60)
+        logger.info("SKILL DEMAND FORECASTING — END-TO-END PIPELINE")
+        logger.info("=" * 60)
+        logger.info("Data source : %s", data_source)
+        logger.info("Bucket      : %s", bucket)
+
+        engineer = SkillFeatureEngineer(database=database, region=region)
+        features_df, target_df = engineer.prepare_training_data_from_s3(
+            bucket=bucket, data_source=data_source
+        )
+
+        training_data = features_df.merge(target_df, on=["skill", "week"])
+
+        temp_path = os.path.join(model_dir, "_training_data.parquet")
+        os.makedirs(model_dir, exist_ok=True)
+        training_data.to_parquet(temp_path, index=False)
+        logger.info("Training data cached at %s (%d rows)", temp_path, len(training_data))
+
+        forecaster = cls()
+        metrics = forecaster.train(temp_path)
+        forecaster.save(model_dir)
+
+        if upload_s3:
+            forecaster.upload_to_s3(model_dir, bucket)
+
+        os.remove(temp_path)
+
+        logger.info("=" * 60)
+        logger.info("PIPELINE COMPLETE")
+        logger.info("=" * 60)
+
+        return forecaster
+
 
 # ── SageMaker hosting hooks ────────────────────────────────────────────────
 
@@ -307,12 +387,34 @@ def predict_fn(input_data: pd.DataFrame, model: SkillDemandForecaster):
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Train skill demand forecasting models"
+    )
+
     parser.add_argument(
         "--train",
         type=str,
         default=os.environ.get("SM_CHANNEL_TRAIN"),
-        help="Path / S3 URI to training parquet",
+        help="Path / S3 URI to training parquet (skip if using --bucket)",
+    )
+    parser.add_argument(
+        "--bucket",
+        type=str,
+        help="S3 bucket — enables end-to-end pipeline (load → featurize → train)",
+    )
+    parser.add_argument(
+        "--data-source",
+        type=str,
+        default="combined",
+        choices=["kaggle", "adzuna", "combined"],
+        help="Which data source to load from S3",
+    )
+    parser.add_argument("--database", default="job_market_db")
+    parser.add_argument("--region", default="us-east-1")
+    parser.add_argument(
+        "--upload-s3",
+        action="store_true",
+        help="Upload model artifacts to S3 after training",
     )
     parser.add_argument(
         "--model-dir",
@@ -324,20 +426,39 @@ if __name__ == "__main__":
         type=str,
         default=os.environ.get("SM_OUTPUT_DATA_DIR", "ml/output"),
     )
+
     args = parser.parse_args()
 
-    forecaster = SkillDemandForecaster()
-    metrics = forecaster.train(args.train)
-    forecaster.save(args.model_dir)
+    if args.bucket:
+        forecaster = SkillDemandForecaster.train_from_s3(
+            bucket=args.bucket,
+            data_source=args.data_source,
+            database=args.database,
+            region=args.region,
+            model_dir=args.model_dir,
+            upload_s3=args.upload_s3,
+        )
+        metrics = forecaster.metrics
+    elif args.train:
+        forecaster = SkillDemandForecaster()
+        metrics = forecaster.train(args.train)
+        forecaster.save(args.model_dir)
+        if args.upload_s3 and args.bucket:
+            forecaster.upload_to_s3(args.model_dir, args.bucket)
+    else:
+        parser.error("Provide either --train <path> or --bucket <s3-bucket>")
 
     print()
-    print("=" * 50)
+    print("=" * 60)
     print("TRAINING COMPLETE")
-    print("=" * 50)
+    print("=" * 60)
     print(f"  Samples            : {metrics['n_samples']}")
     print(f"  Skills             : {metrics['n_skills']}")
     print(f"  Features           : {metrics['n_features']}")
     print(f"  Demand Model R²    : {metrics['demand_model']['cv_r2_mean']:.3f}")
     print(f"  Emerging Detected  : {metrics['emergence_model']['n_emerging_detected']}")
     print(f"  Skill Clusters     : {metrics['cluster_model']['n_clusters']}")
-    print("=" * 50)
+    print(f"  Models saved to    : {args.model_dir}")
+    if args.upload_s3 and args.bucket:
+        print(f"  Models on S3       : s3://{args.bucket}/models/skill_forecaster/")
+    print("=" * 60)
