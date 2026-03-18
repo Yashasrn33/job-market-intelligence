@@ -1,6 +1,6 @@
 from .adzuna import AdzunaScraper, AdzunaConfig, transform_job
+from .adzuna_scraper import AdzunaScraper as AdzunaFullScraper
 from .jsearch import JSearchScraper
-from .kaggle_loader import KaggleLoader
 
-__all__ = ["AdzunaScraper", "AdzunaConfig", "transform_job", "JSearchScraper", "KaggleLoader"]
+__all__ = ["AdzunaScraper", "AdzunaFullScraper", "AdzunaConfig", "transform_job", "JSearchScraper"]
 

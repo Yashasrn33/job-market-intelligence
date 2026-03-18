@@ -1,37 +1,95 @@
 #!/bin/bash
 #===============================================================================
-# SageMaker ML Pipeline Deployment
+# ML Pipeline Deployment
 #
-# Deploys the skill demand forecasting ML pipeline:
-#   1. SageMaker IAM role
-#   2. Feature generation (Athena CTAS)
-#   3. Training job (XGBoost)
-#   4. Model registration
-#   5. Inference endpoint (optional)
+# Trains the skill demand forecasting models using the real training pipeline
+# (ml/training/train.py) and optionally deploys a SageMaker endpoint.
+#
+# Modes:
+#   Local training   — runs train.py directly on this machine
+#   SageMaker        — launches a managed training job (--sagemaker flag)
 #
 # Usage:
-#   bash infrastructure/deploy_ml.sh                    # train only
-#   bash infrastructure/deploy_ml.sh --create-endpoint  # train + endpoint
+#   bash infrastructure/deploy_ml.sh                          # local train
+#   bash infrastructure/deploy_ml.sh --data-source adzuna      # explicit adzuna
+#   bash infrastructure/deploy_ml.sh --sagemaker              # SM training job
+#   bash infrastructure/deploy_ml.sh --create-endpoint        # SM + endpoint
 #===============================================================================
 set -euo pipefail
 
 if [[ -f .env ]]; then set -a; source .env; set +a; fi
 
 BUCKET_NAME="${S3_BUCKET:?Set S3_BUCKET in .env or export it}"
-CREATE_ENDPOINT="${1:-}"
 REGION="${AWS_REGION:-us-east-1}"
+DATABASE="${GLUE_DATABASE:-job_market_db}"
+DATA_SOURCE="adzuna"
+MODEL_DIR="ml/models"
 ROLE_NAME="SageMakerJobMarketRole"
 MODEL_NAME="skill-demand-forecaster"
 ENDPOINT_NAME="skill-demand-endpoint"
+USE_SAGEMAKER=false
+CREATE_ENDPOINT=false
+
+for arg in "$@"; do
+  case "${arg}" in
+    --data-source=*) DATA_SOURCE="${arg#*=}" ;;
+    --data-source)   shift; DATA_SOURCE="${1:-combined}" ;;
+    --sagemaker)     USE_SAGEMAKER=true ;;
+    --create-endpoint) USE_SAGEMAKER=true; CREATE_ENDPOINT=true ;;
+    adzuna) DATA_SOURCE="${arg}" ;;
+  esac
+done
 
 echo "==============================================="
-echo "  SageMaker ML Pipeline Deployment"
+echo "  ML Pipeline Deployment"
 echo "==============================================="
-echo "  Bucket : ${BUCKET_NAME}"
-echo "  Region : ${REGION}"
+echo "  Bucket      : ${BUCKET_NAME}"
+echo "  Region      : ${REGION}"
+echo "  Data source : ${DATA_SOURCE}"
+echo "  Mode        : $(${USE_SAGEMAKER} && echo 'SageMaker' || echo 'Local')"
 echo ""
 
-# ── 1. IAM Role ─────────────────────────────────────────────────────────────
+# ── Local training ──────────────────────────────────────────────────────────
+
+if ! ${USE_SAGEMAKER}; then
+  echo "[1/3] Training models locally …"
+
+  python -m ml.training.train \
+    --bucket "${BUCKET_NAME}" \
+    --data-source "${DATA_SOURCE}" \
+    --database "${DATABASE}" \
+    --region "${REGION}" \
+    --model-dir "${MODEL_DIR}" \
+    --upload-s3
+
+  echo ""
+  echo "[2/3] Verifying model artifacts …"
+  for artifact in demand_model.pkl emergence_model.pkl cluster_model.pkl scaler.pkl feature_cols.json metrics.json; do
+    if [[ -f "${MODEL_DIR}/${artifact}" ]]; then
+      echo "  ✓ ${artifact}"
+    else
+      echo "  ✗ ${artifact} MISSING" >&2
+    fi
+  done
+
+  echo ""
+  echo "[3/3] Model artifacts uploaded to S3"
+  echo "  s3://${BUCKET_NAME}/models/skill_forecaster/"
+
+  echo ""
+  echo "==============================================="
+  echo "  Local Training Complete"
+  echo "==============================================="
+  echo ""
+  echo "Run predictions:"
+  echo "  python -m ml.inference.predictor --model-path ${MODEL_DIR} --action report"
+  echo ""
+  echo "Deploy QuickSight dashboard:"
+  echo "  bash infrastructure/deploy_quicksight.sh"
+  exit 0
+fi
+
+# ── SageMaker training ──────────────────────────────────────────────────────
 
 echo "[1/6] Creating SageMaker IAM role …"
 
@@ -61,15 +119,15 @@ ROLE_ARN="$(aws iam get-role --role-name "${ROLE_NAME}" --query 'Role.Arn' --out
 echo "  Role ARN: ${ROLE_ARN}"
 sleep 10
 
-# ── 2. Upload training scripts ──────────────────────────────────────────────
-
 echo "[2/6] Uploading ML scripts to S3 …"
 
 WORK_DIR="$(mktemp -d)"
-mkdir -p "${WORK_DIR}/code"
+mkdir -p "${WORK_DIR}/code/ml/training"
 
-cp ml/training/train.py        "${WORK_DIR}/code/train.py"
-cp ml/training/feature_engineering.py "${WORK_DIR}/code/feature_engineering.py"
+cp ml/training/train.py              "${WORK_DIR}/code/ml/training/train.py"
+cp ml/training/feature_engineering.py "${WORK_DIR}/code/ml/training/feature_engineering.py"
+touch "${WORK_DIR}/code/ml/__init__.py"
+touch "${WORK_DIR}/code/ml/training/__init__.py"
 
 cat > "${WORK_DIR}/code/requirements.txt" << 'REQ'
 pandas>=2.0.0
@@ -77,6 +135,7 @@ numpy>=1.24.0
 scikit-learn>=1.3.0
 xgboost>=2.0.0
 pyarrow>=14.0.0
+awswrangler>=3.4.0
 REQ
 
 (cd "${WORK_DIR}" && tar -czf sourcedir.tar.gz code/)
@@ -84,75 +143,16 @@ aws s3 cp "${WORK_DIR}/sourcedir.tar.gz" "s3://${BUCKET_NAME}/ml/code/sourcedir.
 rm -rf "${WORK_DIR}"
 echo "  Scripts uploaded."
 
-# ── 3. Generate training features via Athena ─────────────────────────────────
+echo "[3/6] Generating training features via train.py …"
+echo "  (Running feature engineering from S3 data …)"
 
-echo "[3/6] Generating training features …"
+python -m ml.training.feature_engineering \
+  --bucket "${BUCKET_NAME}" \
+  --database "${DATABASE}" \
+  --region "${REGION}" 2>&1 | tail -5
 
-aws athena start-query-execution \
-  --query-string "DROP TABLE IF EXISTS job_market_db.ml_training_data" \
-  --result-configuration "OutputLocation=s3://${BUCKET_NAME}/athena-results/" \
-  --region "${REGION}" >/dev/null
-sleep 5
-
-read -r -d '' FEATURE_SQL << 'FSQL' || true
-CREATE TABLE job_market_db.ml_training_data
-WITH (format = 'PARQUET', external_location = 's3://BUCKET_PLACEHOLDER/ml/features/')
-AS
-WITH weekly_stats AS (
-    SELECT
-        skill,
-        DATE_TRUNC('week', posted_date) AS week,
-        COUNT(*)            AS job_count,
-        AVG(salary_mid_usd) AS avg_salary
-    FROM job_market_db.job_skills
-    GROUP BY skill, DATE_TRUNC('week', posted_date)
-),
-features AS (
-    SELECT
-        skill,
-        week,
-        job_count,
-        avg_salary,
-        LAG(job_count, 1) OVER w AS job_count_lag_1w,
-        LAG(job_count, 4) OVER w AS job_count_lag_4w,
-        LAG(avg_salary, 1) OVER w AS salary_lag_1w,
-        AVG(job_count) OVER (PARTITION BY skill ORDER BY week
-            ROWS BETWEEN 3 PRECEDING AND CURRENT ROW) AS job_count_ma_4w,
-        AVG(job_count) OVER (PARTITION BY skill ORDER BY week
-            ROWS BETWEEN 7 PRECEDING AND CURRENT ROW) AS job_count_ma_8w,
-        (job_count - LAG(job_count, 1) OVER w) * 1.0
-            / NULLIF(LAG(job_count, 1) OVER w, 0) AS wow_growth,
-        (job_count - LAG(job_count, 4) OVER w) * 1.0
-            / NULLIF(LAG(job_count, 4) OVER w, 0) AS mom_growth,
-        LEAD(job_count, 4) OVER w AS target
-    FROM weekly_stats
-    WINDOW w AS (PARTITION BY skill ORDER BY week)
-)
-SELECT * FROM features WHERE target IS NOT NULL
-FSQL
-
-FEATURE_SQL="${FEATURE_SQL//BUCKET_PLACEHOLDER/${BUCKET_NAME}}"
-
-QUERY_ID="$(aws athena start-query-execution \
-  --query-string "${FEATURE_SQL}" \
-  --result-configuration "OutputLocation=s3://${BUCKET_NAME}/athena-results/" \
-  --region "${REGION}" \
-  --query 'QueryExecutionId' --output text)"
-
-echo "  Athena query: ${QUERY_ID}"
-while true; do
-  STATUS="$(aws athena get-query-execution \
-    --query-execution-id "${QUERY_ID}" \
-    --query 'QueryExecution.Status.State' --output text \
-    --region "${REGION}")"
-  echo "  Status: ${STATUS}"
-  [[ "${STATUS}" == "SUCCEEDED" || "${STATUS}" == "FAILED" ]] && break
-  sleep 10
-done
-
-[[ "${STATUS}" == "FAILED" ]] && echo "  WARNING: feature generation may have failed."
-
-# ── 4. SageMaker training job ────────────────────────────────────────────────
+FEATURES_PATH="s3://${BUCKET_NAME}/ml/features/training_data.parquet"
+echo "  Features at: ${FEATURES_PATH}"
 
 echo "[4/6] Starting SageMaker training job …"
 
@@ -202,8 +202,6 @@ MODEL_ARTIFACT="$(aws sagemaker describe-training-job \
   --query 'ModelArtifacts.S3ModelArtifacts' --output text --region "${REGION}")"
 echo "  Artifact: ${MODEL_ARTIFACT}"
 
-# ── 5. Register model ───────────────────────────────────────────────────────
-
 echo "[5/6] Registering model …"
 
 aws sagemaker delete-model --model-name "${MODEL_NAME}" --region "${REGION}" 2>/dev/null || true
@@ -219,9 +217,7 @@ aws sagemaker create-model \
 
 echo "  Model: ${MODEL_NAME}"
 
-# ── 6. Endpoint (optional) ──────────────────────────────────────────────────
-
-if [[ "${CREATE_ENDPOINT}" == "--create-endpoint" ]]; then
+if ${CREATE_ENDPOINT}; then
   echo "[6/6] Creating inference endpoint …"
 
   aws sagemaker create-endpoint-config \
@@ -258,7 +254,7 @@ echo "==============================================="
 echo "  Training Job  : ${TRAINING_JOB}"
 echo "  Model         : ${MODEL_NAME}"
 echo "  Model Artifact: ${MODEL_ARTIFACT}"
-[[ "${CREATE_ENDPOINT}" == "--create-endpoint" ]] && echo "  Endpoint      : ${ENDPOINT_NAME}"
+${CREATE_ENDPOINT} && echo "  Endpoint      : ${ENDPOINT_NAME}"
 echo ""
 echo "Run predictions locally:"
 echo "  python -m ml.inference.predictor --model-path ml/models --action report"

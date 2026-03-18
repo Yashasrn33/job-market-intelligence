@@ -1,5 +1,0 @@
-streamlit>=1.29.0
-plotly>=5.18.0
-pandas>=2.0.0
-boto3>=1.34.0
-awswrangler>=3.4.0

@@ -14,8 +14,8 @@ BUCKET_NAME="${S3_BUCKET:?Set S3_BUCKET in .env or export it}"
 REGION="${AWS_REGION:-us-east-1}"
 WITH_ML="${1:-}"
 
-TOTAL_STEPS=4
-[[ "${WITH_ML}" == "--with-ml" ]] && TOTAL_STEPS=5
+TOTAL_STEPS=5
+[[ "${WITH_ML}" == "--with-ml" ]] && TOTAL_STEPS=6
 
 echo "============================================"
 echo "  Running Job Market Intelligence Pipeline"
@@ -24,15 +24,40 @@ echo "============================================"
 # ── Step 1: Invoke Lambda scraper ──────────────────────────────────────────
 echo ""
 echo "Step 1/${TOTAL_STEPS}: Collecting jobs from Adzuna..."
+EXECUTION_DATE="$(date -u +%F)"
+RAW_KEY="raw/jobs/source=adzuna/date=${EXECUTION_DATE}/jobs.json"
+
+echo "  Invoking Lambda (async) ..."
 aws lambda invoke \
   --function-name job-market-scraper \
+  --invocation-type Event \
   --payload '{}' \
   --region "${REGION}" \
-  output.json >/dev/null
+  /dev/null >/dev/null
 
-echo "  Lambda result:"
-cat output.json
-echo ""
+echo "  Waiting for raw data in S3:"
+echo "    s3://${BUCKET_NAME}/${RAW_KEY}"
+
+MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-420}"
+SLEEP_SECONDS="${SLEEP_SECONDS:-10}"
+ELAPSED=0
+
+while true; do
+  if aws s3api head-object --bucket "${BUCKET_NAME}" --key "${RAW_KEY}" --region "${REGION}" >/dev/null 2>&1; then
+    echo "  ✓ Raw data found."
+    break
+  fi
+
+  if (( ELAPSED >= MAX_WAIT_SECONDS )); then
+    echo "ERROR: Timed out waiting for raw data after ${MAX_WAIT_SECONDS}s." >&2
+    echo "Check Lambda logs:" >&2
+    echo "  aws logs tail /aws/lambda/job-market-scraper --region ${REGION} --since 30m --follow" >&2
+    exit 1
+  fi
+
+  sleep "${SLEEP_SECONDS}"
+  ELAPSED=$((ELAPSED + SLEEP_SECONDS))
+done
 
 # ── Step 2: Run Glue ETL ──────────────────────────────────────────────────
 echo "Step 2/${TOTAL_STEPS}: Processing data with Glue ETL..."
@@ -87,12 +112,15 @@ aws athena get-query-results \
   --region "${REGION}" 2>/dev/null \
   || echo "  (query still running -- check Athena console)"
 
-rm -f output.json
+# ── Step 5: Refresh Athena views for QuickSight ──────────────────────────
+echo ""
+echo "Step 5/${TOTAL_STEPS}: Refreshing QuickSight Athena views..."
+bash infrastructure/deploy_quicksight.sh --views-only
 
-# ── Step 5 (optional): ML training ────────────────────────────────────────
+# ── Step 6 (optional): ML training ────────────────────────────────────────
 if [[ "${WITH_ML}" == "--with-ml" ]]; then
   echo ""
-  echo "Step 5/${TOTAL_STEPS}: Running ML pipeline (feature gen + training)..."
+  echo "Step 6/${TOTAL_STEPS}: Running ML pipeline (feature gen + training)..."
   bash infrastructure/deploy_ml.sh
 fi
 
@@ -103,5 +131,5 @@ echo "============================================"
 echo ""
 echo "  View data  : aws s3 ls s3://${BUCKET_NAME}/processed/ --recursive"
 echo "  Athena UI  : https://console.aws.amazon.com/athena"
-echo "  Dashboard  : cd visualization/streamlit_app && streamlit run app.py"
+echo "  Dashboard  : bash infrastructure/deploy_quicksight.sh"
 [[ "${WITH_ML}" != "--with-ml" ]] && echo "  ML training : bash run_pipeline.sh --with-ml"

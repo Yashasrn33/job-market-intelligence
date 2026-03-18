@@ -62,24 +62,17 @@ class SkillFeatureEngineer:
     def load_skill_data_from_s3(
         self,
         bucket: str,
-        data_source: str = "combined",
+        data_source: str = "adzuna",
     ) -> pd.DataFrame:
         """
         Load raw job_skills data from S3 parquet and aggregate to weekly level.
 
-        Tries Athena first, falls back to direct S3 parquet reads.
-
         Args:
             bucket: S3 bucket name.
-            data_source: 'kaggle', 'adzuna', or 'combined'.
+            data_source: 'adzuna' (only supported source).
         """
         paths = {
-            "kaggle": [f"s3://{bucket}/processed/job_skills_kaggle/"],
             "adzuna": [f"s3://{bucket}/processed/job_skills/"],
-            "combined": [
-                f"s3://{bucket}/processed/job_skills/",
-                f"s3://{bucket}/processed/job_skills_kaggle/",
-            ],
         }
 
         if data_source not in paths:
@@ -441,7 +434,7 @@ class SkillFeatureEngineer:
     def prepare_training_data_from_s3(
         self,
         bucket: str,
-        data_source: str = "combined",
+        data_source: str = "adzuna",
         target_horizon: int = 4,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
@@ -449,7 +442,7 @@ class SkillFeatureEngineer:
 
         Args:
             bucket: S3 bucket name.
-            data_source: 'kaggle', 'adzuna', or 'combined'.
+            data_source: 'adzuna' (only supported source).
             target_horizon: weeks ahead to predict.
 
         Returns:

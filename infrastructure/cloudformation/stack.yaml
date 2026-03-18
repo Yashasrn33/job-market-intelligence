@@ -1,18 +1,347 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Job Market Intelligence minimal resources (optional IaC)
+Description: >
+  Job Market Intelligence — full infrastructure stack.
+  Deploys S3, IAM roles, Secrets Manager, Glue database/tables,
+  Lambda scraper with EventBridge schedule, and Glue ETL job.
 
+# ─────────────────────────────────────────────────────────────
+# Parameters
+# ─────────────────────────────────────────────────────────────
 Parameters:
   BucketName:
     Type: String
     Description: Globally unique S3 bucket name for the data lake
 
+  AdzunaAppId:
+    Type: String
+    Default: YOUR_ADZUNA_APP_ID
+    Description: Adzuna API app_id (update after deployment)
+
+  AdzunaAppKey:
+    Type: String
+    Default: YOUR_ADZUNA_APP_KEY
+    NoEcho: true
+    Description: Adzuna API app_key (update after deployment)
+
+  GlueDatabaseName:
+    Type: String
+    Default: job_market_db
+    Description: Glue catalog database name
+
+  LambdaRuntime:
+    Type: String
+    Default: python3.11
+    AllowedValues: [python3.11, python3.12]
+
+# ─────────────────────────────────────────────────────────────
+# Resources
+# ─────────────────────────────────────────────────────────────
 Resources:
+
+  # ── S3 Data Lake Bucket ─────────────────────────────────────
+
   DataLakeBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Ref BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireTempFiles
+            Prefix: temp/
+            Status: Enabled
+            ExpirationInDays: 7
+          - Id: ExpireAthenaResults
+            Prefix: athena-results/
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - Key: Project
+          Value: job-market-intelligence
 
+  # ── Secrets Manager — Adzuna API credentials ───────────────
+
+  AdzunaSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: job-market/adzuna-api
+      Description: Adzuna API credentials for the job scraper Lambda
+      SecretString: !Sub |
+        {"app_id":"${AdzunaAppId}","app_key":"${AdzunaAppKey}"}
+
+  # ── IAM Role — Lambda Scraper ──────────────────────────────
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: JobMarketLambdaRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: JobMarketLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DataLakeBucket.Arn
+                  - !Sub "${DataLakeBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref AdzunaSecret
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  # ── IAM Role — Glue ETL ───────────────────────────────────
+
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AWSGlueServiceRole-JobMarket
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueS3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:*
+                Resource:
+                  - !GetAtt DataLakeBucket.Arn
+                  - !Sub "${DataLakeBucket.Arn}/*"
+
+  # ── IAM Role — SageMaker Training ─────────────────────────
+
+  SageMakerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SageMakerJobMarketRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonAthenaFullAccess
+
+  # ── Glue Catalog Database ──────────────────────────────────
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref GlueDatabaseName
+        Description: Job market intelligence data catalog
+
+  # ── Glue Table — jobs ──────────────────────────────────────
+
+  GlueJobsTable:
+    Type: AWS::Glue::Table
+    DependsOn: GlueDatabase
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabaseName
+      TableInput:
+        Name: jobs
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - Name: year
+            Type: int
+          - Name: month
+            Type: int
+        StorageDescriptor:
+          Location: !Sub "s3://${BucketName}/processed/jobs/"
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - {Name: job_id, Type: string}
+            - {Name: title, Type: string}
+            - {Name: company, Type: string}
+            - {Name: description, Type: string}
+            - {Name: location, Type: string}
+            - {Name: country, Type: string}
+            - {Name: salary_min_usd, Type: double}
+            - {Name: salary_max_usd, Type: double}
+            - {Name: salary_mid_usd, Type: double}
+            - {Name: category, Type: string}
+            - {Name: url, Type: string}
+            - {Name: posted_date, Type: date}
+            - {Name: extracted_skills, Type: "array<string>"}
+            - {Name: skill_count, Type: int}
+
+  # ── Glue Table — job_skills ────────────────────────────────
+
+  GlueJobSkillsTable:
+    Type: AWS::Glue::Table
+    DependsOn: GlueDatabase
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabaseName
+      TableInput:
+        Name: job_skills
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - Name: year
+            Type: int
+          - Name: month
+            Type: int
+        StorageDescriptor:
+          Location: !Sub "s3://${BucketName}/processed/job_skills/"
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - {Name: job_id, Type: string}
+            - {Name: posted_date, Type: date}
+            - {Name: country, Type: string}
+            - {Name: salary_mid_usd, Type: double}
+            - {Name: skill, Type: string}
+
+  # ── Glue ETL Job ──────────────────────────────────────────
+
+  GlueETLJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: job-market-etl
+      Role: !GetAtt GlueServiceRole.Arn
+      GlueVersion: "4.0"
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+      Timeout: 30
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${BucketName}/scripts/job_processor.py"
+        PythonVersion: "3"
+      DefaultArguments:
+        "--S3_BUCKET": !Ref BucketName
+        "--DATABASE": !Ref GlueDatabaseName
+        "--TempDir": !Sub "s3://${BucketName}/temp/"
+
+  # ── Lambda Scraper Function ────────────────────────────────
+
+  ScraperFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: job-market-scraper
+      Runtime: !Ref LambdaRuntime
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref BucketName
+      Code:
+        S3Bucket: !Ref BucketName
+        S3Key: scripts/lambda_deployment.zip
+      Tags:
+        - Key: Project
+          Value: job-market-intelligence
+
+  # ── EventBridge — Daily Schedule ───────────────────────────
+
+  DailyScraperRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: daily-job-scrape
+      Description: Trigger job scraper Lambda daily at 6 AM UTC
+      ScheduleExpression: "cron(0 6 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ScraperFunction.Arn
+          Id: ScraperTarget
+
+  ScraperInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScraperFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyScraperRule.Arn
+
+  # ── QuickSight Data Source (Athena) ───────────────────────────
+
+  QuickSightAthenaDataSource:
+    Type: AWS::QuickSight::DataSource
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      DataSourceId: job-market-athena
+      Name: Job Market Intelligence (Athena)
+      Type: ATHENA
+      DataSourceParameters:
+        AthenaParameters:
+          WorkGroup: primary
+
+# ─────────────────────────────────────────────────────────────
+# Outputs
+# ─────────────────────────────────────────────────────────────
 Outputs:
   BucketName:
+    Description: S3 data lake bucket
     Value: !Ref DataLakeBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-BucketName"
 
+  BucketArn:
+    Description: S3 bucket ARN
+    Value: !GetAtt DataLakeBucket.Arn
+
+  LambdaFunctionArn:
+    Description: Scraper Lambda ARN
+    Value: !GetAtt ScraperFunction.Arn
+
+  GlueJobName:
+    Description: Glue ETL job name
+    Value: !Ref GlueETLJob
+
+  GlueDatabaseName:
+    Description: Glue catalog database
+    Value: !Ref GlueDatabase
+
+  SageMakerRoleArn:
+    Description: SageMaker execution role ARN
+    Value: !GetAtt SageMakerRole.Arn
+
+  QuickSightDataSourceId:
+    Description: QuickSight Athena data source
+    Value: !Ref QuickSightAthenaDataSource
+
+  DeployCommand:
+    Description: Deploy this stack
+    Value: !Sub >
+      aws cloudformation deploy
+      --template-file infrastructure/cloudformation/stack.yaml
+      --stack-name job-market-intelligence
+      --parameter-overrides BucketName=${BucketName}
+      --capabilities CAPABILITY_NAMED_IAM

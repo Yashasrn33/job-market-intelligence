@@ -26,6 +26,11 @@ cp ingestion/lambda_function.py "${DEPLOY_DIR}/"
 echo "Creating zip..."
 (cd "${DEPLOY_DIR}" && zip -r ../deployment.zip . -q)
 
+# --- Upload zip to S3 (more reliable than fileb:// for large payloads) ---
+S3_KEY="lambda/${FUNCTION_NAME}/deployment.zip"
+echo "Uploading deployment package to s3://${BUCKET_NAME}/${S3_KEY}..."
+aws s3 cp deployment.zip "s3://${BUCKET_NAME}/${S3_KEY}" --region "${REGION}"
+
 # --- Deploy ---
 ROLE_ARN="$(aws iam get-role --role-name "${ROLE_NAME}" --query 'Role.Arn' --output text)"
 echo "Using role: ${ROLE_ARN}"
@@ -36,7 +41,8 @@ if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${REGION
   echo "Updating existing function..."
   aws lambda update-function-code \
     --function-name "${FUNCTION_NAME}" \
-    --zip-file fileb://deployment.zip \
+    --s3-bucket "${BUCKET_NAME}" \
+    --s3-key "${S3_KEY}" \
     --region "${REGION}" >/dev/null
 else
   echo "Creating new function..."
@@ -45,7 +51,7 @@ else
     --runtime "${RUNTIME}" \
     --role "${ROLE_ARN}" \
     --handler lambda_function.lambda_handler \
-    --zip-file fileb://deployment.zip \
+    --code "S3Bucket=${BUCKET_NAME},S3Key=${S3_KEY}" \
     --timeout "${TIMEOUT}" \
     --memory-size "${MEMORY}" \
     --region "${REGION}" \

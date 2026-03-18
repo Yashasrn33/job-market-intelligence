@@ -10,7 +10,7 @@ Usage (local — from parquet):
     python -m ml.training.train --train data/training_data.parquet --model-dir ml/models
 
 Usage (local — from S3):
-    python -m ml.training.train --bucket my-bucket --data-source kaggle --model-dir ml/models
+    python -m ml.training.train --bucket my-bucket --model-dir ml/models
 
 Usage (SageMaker):
     Automatically receives --train, --model-dir, --output-data-dir via SM env vars.
@@ -300,7 +300,7 @@ class SkillDemandForecaster:
     def train_from_s3(
         cls,
         bucket: str,
-        data_source: str = "combined",
+        data_source: str = "adzuna",
         database: str = "job_market_db",
         region: str = "us-east-1",
         model_dir: str = "ml/models",
@@ -311,7 +311,7 @@ class SkillDemandForecaster:
 
         Args:
             bucket: S3 bucket name.
-            data_source: 'kaggle', 'adzuna', or 'combined'.
+            data_source: 'adzuna' (only supported source).
             database: Glue catalog database name.
             region: AWS region.
             model_dir: local directory for saving model artifacts.
@@ -405,9 +405,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data-source",
         type=str,
-        default="combined",
-        choices=["kaggle", "adzuna", "combined"],
-        help="Which data source to load from S3",
+        default="adzuna",
+        choices=["adzuna"],
+        help="Data source to load from S3",
     )
     parser.add_argument("--database", default="job_market_db")
     parser.add_argument("--region", default="us-east-1")

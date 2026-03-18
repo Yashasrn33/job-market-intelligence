@@ -10,11 +10,9 @@ numpy>=1.24.0
 xgboost>=2.0.0
 
 # Data Ingestion
-kaggle>=1.6.0
+tenacity>=8.2.0
 
-# Visualization
-streamlit>=1.29.0
-plotly>=5.18.0
+# Visualization (QuickSight — managed via AWS, no Python deps needed)
 
 # AWS Data Tools
 awswrangler>=3.4.0

@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 class SkillDemandPredictor:
     """Production inference class for skill demand predictions."""
 
+    EMERGENCE_FEATURES = [
+        "mom_growth",
+        "qoq_growth",
+        "growth_acceleration",
+        "market_share_change",
+        "trend_strength_8w",
+        "emergence_score",
+    ]
+
     def __init__(
         self,
         model_path: Optional[str] = None,
@@ -39,6 +48,7 @@ class SkillDemandPredictor:
         self.database = database
         self.region = region
         self.sagemaker_endpoint = sagemaker_endpoint
+        self.boto3_session = boto3.Session(region_name=self.region)
 
         if model_path:
             self._load_local_model(model_path)
@@ -119,7 +129,7 @@ class SkillDemandPredictor:
         """
 
         df = wr.athena.read_sql_query(
-            query, database=self.database, region_name=self.region
+            query, database=self.database, boto3_session=self.boto3_session
         )
 
         df["wow_growth"] = (
@@ -132,6 +142,37 @@ class SkillDemandPredictor:
         )
 
         return df
+
+    def _get_weekly_history(
+        self, skills: Optional[List[str]] = None, lookback_weeks: int = 16
+    ) -> pd.DataFrame:
+        """Fetch weekly aggregates for the last *lookback_weeks* for feature engineering."""
+        skill_filter = ""
+        if skills:
+            skill_list = ", ".join(f"'{s}'" for s in skills)
+            skill_filter = f"AND skill IN ({skill_list})"
+
+        query = f"""
+        WITH latest_week AS (
+            SELECT MAX(DATE_TRUNC('week', posted_date)) AS max_week
+            FROM {self.database}.job_skills
+        )
+        SELECT
+            skill,
+            DATE_TRUNC('week', posted_date) AS week,
+            COUNT(*)            AS job_count,
+            AVG(salary_mid_usd) AS avg_salary
+        FROM {self.database}.job_skills
+        WHERE posted_date >= DATE_ADD('week', -{lookback_weeks},
+                                      (SELECT max_week FROM latest_week))
+              {skill_filter}
+        GROUP BY skill, DATE_TRUNC('week', posted_date)
+        ORDER BY skill, week
+        """
+
+        return wr.athena.read_sql_query(
+            query, database=self.database, boto3_session=self.boto3_session
+        )
 
     def _align_features(self, df: pd.DataFrame) -> np.ndarray:
         """Ensure df has every expected feature column, then scale."""
@@ -185,25 +226,78 @@ class SkillDemandPredictor:
 
         logger.info("Detecting emerging skills …")
 
-        df = self._get_latest_features()
+        hist = self._get_weekly_history(lookback_weeks=20)
+        hist = hist.sort_values(["skill", "week"])
 
-        df["growth_velocity"] = df["wow_growth"] * 4 + df["mom_growth"]
-        df["relative_growth"] = df["mom_growth"] - df["mom_growth"].mean()
+        # Growth features (match training feature engineering)
+        hist["wow_growth"] = hist.groupby("skill")["job_count"].pct_change(1)
+        hist["mom_growth"] = hist.groupby("skill")["job_count"].pct_change(4)
+        hist["qoq_growth"] = hist.groupby("skill")["job_count"].pct_change(12)
+        hist["growth_acceleration"] = hist.groupby("skill")["wow_growth"].diff()
 
-        X_em = df[["wow_growth", "mom_growth"]].fillna(0).values
+        overall_weekly = hist.groupby("week")["job_count"].transform("sum")
+        hist["market_share"] = hist["job_count"] / (overall_weekly + 1e-8)
+        hist["market_share_change"] = hist.groupby("skill")["market_share"].pct_change(4)
+
+        def _trend_strength(x: np.ndarray) -> float:
+            if len(x) < 4:
+                return np.nan
+            t = np.arange(len(x))
+            try:
+                slope, _ = np.polyfit(t, x, 1)
+                predicted = slope * t + np.mean(x) - slope * np.mean(t)
+                ss_res = np.sum((x - predicted) ** 2)
+                ss_tot = np.sum((x - np.mean(x)) ** 2)
+                return 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+            except Exception:
+                return np.nan
+
+        hist["trend_strength_8w"] = hist.groupby("skill")["job_count"].transform(
+            lambda x: x.rolling(8, min_periods=4).apply(
+                lambda arr: _trend_strength(arr), raw=True
+            )
+        )
+
+        # Composite emergence_score (same weights as training)
+        def _norm_weekly(col: str) -> pd.Series:
+            return hist.groupby("week")[col].transform(
+                lambda x: (x - x.min()) / (x.max() - x.min() + 1e-8)
+            )
+
+        hist["growth_score"] = _norm_weekly("mom_growth").clip(0, 1)
+        hist["acceleration_score"] = _norm_weekly("growth_acceleration").clip(0, 1)
+        hist["trend_score"] = hist["trend_strength_8w"].fillna(0).clip(0, 1)
+
+        historical_avg = hist.groupby("skill")["job_count"].transform("mean")
+        hist["novelty_score"] = 1 / (1 + np.log1p(historical_avg))
+        hist["novelty_score"] = _norm_weekly("novelty_score")
+
+        hist["emergence_score"] = (
+            0.35 * hist["growth_score"]
+            + 0.25 * hist["acceleration_score"]
+            + 0.25 * hist["trend_score"]
+            + 0.15 * hist["novelty_score"]
+        )
+
+        # Score only the latest row per skill.
+        latest = hist.sort_values("week").groupby("skill").tail(1).copy()
+
+        X_scaled = self._align_features(latest)
+        eidx = [self.feature_cols.index(f) for f in self.EMERGENCE_FEATURES if f in self.feature_cols]
+        X_em = X_scaled[:, eidx]
+
         raw_scores = -self.emergence_model.decision_function(X_em)
-
         score_min, score_max = raw_scores.min(), raw_scores.max()
-        df["emergence_score"] = (raw_scores - score_min) / (score_max - score_min + 1e-8)
+        latest["emergence_score_model"] = (raw_scores - score_min) / (score_max - score_min + 1e-8)
 
-        emerging = df[
-            (df["emergence_score"] >= threshold) & (df["mom_growth"] > 0.1)
+        emerging = latest[
+            (latest["emergence_score_model"] >= threshold) & (latest["mom_growth"] > 0.1)
         ].copy()
 
-        emerging = emerging.sort_values("emergence_score", ascending=False).head(top_n)
+        emerging = emerging.sort_values("emergence_score_model", ascending=False).head(top_n)
 
         out = emerging[
-            ["skill", "job_count", "emergence_score", "mom_growth", "avg_salary"]
+            ["skill", "job_count", "emergence_score_model", "mom_growth", "avg_salary"]
         ].copy()
         out.columns = [
             "skill",

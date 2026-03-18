@@ -1,0 +1,145 @@
+{
+  "demand_model": {
+    "cv_mae_mean": 37.40938920676708,
+    "cv_mae_std": 14.944478560227328,
+    "cv_rmse_mean": 47.29306068695058,
+    "cv_r2_mean": -0.8920760650618405,
+    "top_features": [
+      [
+        "salary_wow_growth",
+        0.1365841031074524
+      ],
+      [
+        "category_job_count",
+        0.12834063172340393
+      ],
+      [
+        "job_count_ma_4w",
+        0.07867611944675446
+      ],
+      [
+        "market_share",
+        0.07420005649328232
+      ],
+      [
+        "job_count_ema_4w",
+        0.06544721126556396
+      ],
+      [
+        "cv_8w",
+        0.057936232537031174
+      ],
+      [
+        "trend_strength_8w",
+        0.05130563676357269
+      ],
+      [
+        "wow_growth",
+        0.04875227436423302
+      ],
+      [
+        "salary_ma_8w",
+        0.045020077377557755
+      ],
+      [
+        "job_count_std_8w",
+        0.044526126235723495
+      ]
+    ]
+  },
+  "emergence_model": {
+    "n_emerging_detected": 0,
+    "emerging_skills_sample": [],
+    "anomaly_threshold": 0.0
+  },
+  "cluster_model": {
+    "n_clusters": 8,
+    "cluster_profiles": {
+      "0": {
+        "skills": [
+          "gcp",
+          "javascript",
+          "jenkins",
+          "kafka",
+          "kubernetes",
+          "nodejs",
+          "typescript",
+          "vue"
+        ],
+        "count": 8
+      },
+      "1": {
+        "skills": [
+          "react"
+        ],
+        "count": 1
+      },
+      "2": {
+        "skills": [
+          "ci/cd",
+          "docker"
+        ],
+        "count": 2
+      },
+      "3": {
+        "skills": [
+          "python"
+        ],
+        "count": 1
+      },
+      "4": {
+        "skills": [
+          "angular"
+        ],
+        "count": 1
+      },
+      "5": {
+        "skills": [
+          "aws",
+          "azure",
+          "java",
+          "machine learning"
+        ],
+        "count": 4
+      },
+      "6": {
+        "skills": [
+          "fastapi",
+          "spark"
+        ],
+        "count": 2
+      },
+      "7": {
+        "skills": [
+          "go"
+        ],
+        "count": 1
+      }
+    },
+    "skill_cluster_mapping": {
+      "angular": 4,
+      "aws": 5,
+      "azure": 5,
+      "ci/cd": 2,
+      "docker": 2,
+      "fastapi": 6,
+      "gcp": 0,
+      "go": 7,
+      "java": 5,
+      "javascript": 0,
+      "jenkins": 0,
+      "kafka": 0,
+      "kubernetes": 0,
+      "machine learning": 5,
+      "nodejs": 0,
+      "python": 3,
+      "react": 1,
+      "spark": 6,
+      "typescript": 0,
+      "vue": 0
+    }
+  },
+  "n_samples": 97,
+  "n_skills": 20,
+  "n_features": 32
+}
