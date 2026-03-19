@@ -24,6 +24,7 @@ job-market-intelligence/
 │   └── scrapers/                 # Reusable scraper modules
 │       ├── adzuna.py             # Lightweight Lambda scraper
 │       ├── adzuna_scraper.py     # Full production scraper (standalone)
+│       ├── remoteok.py           # RemoteOK scraper (no API key needed)
 │       └── jsearch.py
 │
 ├── processing/                    # ETL & Transformation
@@ -44,6 +45,8 @@ job-market-intelligence/
 │
 ├── ml/                            # Machine Learning
 │   ├── training/
+│   │   ├── train.py              # Main training entrypoint
+│   │   ├── feature_engineering.py
 │   │   ├── skill_forecast.py
 │   │   ├── skill_embedding.py
 │   │   └── emerging_detector.py
@@ -110,12 +113,32 @@ aws secretsmanager put-secret-value \
   --secret-string '{"app_id":"YOUR_REAL_ID","app_key":"YOUR_REAL_KEY"}'
 ```
 
-### 3. (Optional) Bulk-Scrape Adzuna Data
+### 3. Data Ingestion Options
 
-Use the standalone Adzuna scraper to collect jobs across multiple countries in one batch:
+> **⚠️ IMPORTANT: Choose ONE ingestion method to avoid partition conflicts.**
+> 
+> The Lambda writes JSON with `date=YYYY-MM-DD` partitions, while the standalone scraper writes Parquet with `year=YYYY/month=M` partitions. **Do not mix them** — the Glue ETL job will fail with "Conflicting partition column names detected" if both exist.
+
+#### Option A: Lambda Ingestion (Recommended for Production)
+
+Best for: Daily automated ingestion, smaller batches
+
+```bash
+# Run the full pipeline (Lambda → Glue ETL → Athena)
+bash run_pipeline.sh
+```
+
+#### Option B: Standalone Scraper (Recommended for Bulk Collection)
+
+Best for: Initial data load, bulk historical scraping, local development
 
 ```bash
 BUCKET=$(grep S3_BUCKET .env | cut -d= -f2)
+
+# Clear any existing raw data first to avoid conflicts
+aws s3 rm "s3://${BUCKET}/raw/jobs/source=adzuna/" --recursive
+
+# Run bulk scraper
 python -m ingestion.scrapers.adzuna_scraper \
   --bucket "${BUCKET}" \
   --countries us,gb,ca \
@@ -126,37 +149,56 @@ python -m ingestion.scrapers.adzuna_scraper \
 This will:
 - Query Adzuna API for tech jobs across categories and search terms
 - Extract skills from job descriptions
-- Write Parquet to:
-  - `s3://$BUCKET/raw/jobs/source=adzuna/`
-  - `s3://$BUCKET/processed/jobs/`
-  - `s3://$BUCKET/processed/job_skills/`
-  - `s3://$BUCKET/ml/training_data/`
+- Write Parquet to `s3://$BUCKET/raw/jobs/source=adzuna/year=YYYY/month=M/`
 
-To save locally instead of uploading to S3:
+Then run the pipeline without re-ingesting:
 
 ```bash
-python -m ingestion.scrapers.adzuna_scraper --no-upload
+bash run_pipeline.sh --skip-ingest --with-ml
 ```
 
-### 4. Run the Live Ingestion + ETL Pipeline
+#### Option C: RemoteOK (No API Key Required)
+
+Best for: Testing the pipeline, when Adzuna quota is exhausted
 
 ```bash
+# Test the API first
+python -m ingestion.scrapers.remoteok --dry-run
+
+# Full ingestion to S3
+BUCKET=$(grep S3_BUCKET .env | cut -d= -f2)
+python -m ingestion.scrapers.remoteok --s3-bucket "${BUCKET}"
+```
+
+### 4. Run the Pipeline
+
+```bash
+# Full pipeline: ingest + ETL + Athena
 bash run_pipeline.sh
+
+# Skip ingestion (use existing raw data)
+bash run_pipeline.sh --skip-ingest
+
+# Include ML training
+bash run_pipeline.sh --with-ml
+
+# Skip ingestion + run ML
+bash run_pipeline.sh --skip-ingest --with-ml
 ```
 
-This script:
-- Invokes the `job-market-scraper` Lambda (Adzuna → raw S3)
-- Runs the `job-market-etl` Glue job (raw → `processed/jobs` + `processed/job_skills`)
-- Repairs partitions for `jobs` and `job_skills`
-- Executes a smoke-test Athena query to confirm data is queryable
+The pipeline script will:
+1. Invoke the `job-market-scraper` Lambda (unless `--skip-ingest`)
+2. Run the `job-market-etl` Glue job
+3. Repair Athena partitions for `jobs` and `job_skills` tables
+4. Execute a smoke-test query to confirm data is queryable
+5. (Optional) Train ML models if `--with-ml` is specified
 
-You can re-run this anytime to ingest more live data; the Lambda also runs daily via EventBridge.
+### 5. Train the ML Models
 
-### 5. Train the ML Models (Demand Forecast + Emerging Skills + Clusters)
-
-The main training entrypoint is `ml/training/train.py`. You can call it directly or via the helper script.
-
-**Option A – Direct call (recommended starting point)**
+The ML pipeline trains three models:
+- **XGBoost Demand Forecaster** — Predicts future job counts per skill
+- **IsolationForest Emerging Detector** — Identifies skills with unusual growth
+- **KMeans Skill Clusters** — Groups similar skills together
 
 ```bash
 BUCKET=$(grep S3_BUCKET .env | cut -d= -f2)
@@ -167,22 +209,9 @@ python -m ml.training.train \
   --upload-s3
 ```
 
-This will:
-- Load job_skills data from S3 (Adzuna)
-- Engineer time-series features (lags, rolling stats, growth, emergence score, etc.)
-- Train:
-  - XGBoost demand forecaster
-  - IsolationForest emerging skill detector
-  - KMeans skill clusters
-- Save artifacts to `ml/models/` and upload to `s3://$BUCKET/models/skill_forecaster/`
-
-**Option B – Full pipeline with ML in one command**
-
-```bash
-bash run_pipeline.sh --with-ml
-```
-
-This runs Steps 4 and 5 together (ingestion + ETL + training).
+Artifacts are saved to:
+- Local: `ml/models/skill_forecaster/`
+- S3: `s3://$BUCKET/models/skill_forecaster/`
 
 ### 6. Run Predictions (CLI)
 
@@ -203,7 +232,7 @@ python -m ml.inference.predictor \
   --model-path ml/models \
   --action emerging
 
-# Skill recommendations (\"if you know X, learn Y\")
+# Skill recommendations ("if you know X, learn Y")
 python -m ml.inference.predictor \
   --model-path ml/models \
   --action recommend \
@@ -228,8 +257,6 @@ This creates:
 - **QuickSight data source** connected to Athena
 - **8 QuickSight datasets** ready to build visuals from
 
-Then open the QuickSight console and create an analysis:
-
 | Dataset | Recommended Visual |
 |---------|-------------------|
 | `jmi-top-skills` | Horizontal bar (skill x job_count, color by avg_salary) |
@@ -241,25 +268,105 @@ Then open the QuickSight console and create an analysis:
 | `jmi-dashboard-kpis` | KPI widgets (total_jobs, unique_skills, avg_salary) |
 | `jmi-skills-by-category` | Pie or treemap (category x job_count) |
 
-QuickSight datasets use DIRECT_QUERY mode, so dashboards always reflect the latest data.
-
 ### 8. Run Tests
 
 ```bash
 pytest -q          # all tests
 ```
 
-Key test modules:
-- `tests/test_ingestion.py` – Adzuna transform
-- `tests/test_processing.py` – skill extraction
-- `tests/test_ml.py` – feature engineering, training, inference, Adzuna scraper
+---
+
+## Troubleshooting
+
+### Glue ETL Fails: "Conflicting partition column names detected"
+
+**Cause**: Mixed partition schemes in `raw/jobs/` — both `date=` (Lambda) and `year=/month=` (standalone scraper) exist.
+
+**Fix**:
+```bash
+# Check what's in raw/jobs
+aws s3 ls s3://${S3_BUCKET}/raw/jobs/ --recursive --human-readable
+
+# Remove ALL raw data and re-ingest with ONE method
+aws s3 rm "s3://${S3_BUCKET}/raw/jobs/source=adzuna/" --recursive
+
+# Then run your chosen ingestion method
+```
+
+### Glue ETL Fails: "Can't extract value from location: need struct type but got string"
+
+**Cause**: Schema mismatch — the Glue script expected nested JSON but found flat Parquet columns.
+
+**Fix**: Ensure `processing/glue_jobs/job_processor.py` handles both formats (the current version does). Re-upload to S3:
+```bash
+aws s3 cp processing/glue_jobs/job_processor.py \
+  s3://${S3_BUCKET}/scripts/job_processor.py
+```
+
+### Adzuna API: "Usage limits exceeded" / AUTH_FAIL
+
+**Cause**: Free tier quota exhausted (typically resets every 24 hours).
+
+**Fix Options**:
+1. Wait for quota reset
+2. Use RemoteOK scraper (no API key needed): `python -m ingestion.scrapers.remoteok --dry-run`
+3. Use existing data: `bash run_pipeline.sh --skip-ingest`
+
+### ML Training: "No data found for source 'adzuna'"
+
+**Cause**: The `processed/job_skills/` folder is empty — ETL hasn't run successfully.
+
+**Fix**:
+```bash
+# Check if processed data exists
+aws s3 ls s3://${S3_BUCKET}/processed/job_skills/ --recursive
+
+# If empty, run the ETL first
+bash run_pipeline.sh --skip-ingest
+
+# Then run ML training
+python -m ml.training.train --bucket "${S3_BUCKET}" --model-dir ml/models --upload-s3
+```
+
+### Lambda Times Out or Returns Empty Data
+
+**Check Lambda logs**:
+```bash
+aws logs tail /aws/lambda/job-market-scraper --since 30m --follow
+```
+
+**Verify Secrets Manager has correct credentials**:
+```bash
+aws secretsmanager get-secret-value --secret-id job-market/adzuna-api \
+  --query 'SecretString' --output text | jq .
+```
+
+### How to Verify Pipeline Health
+
+```bash
+# 1. Check raw data exists and has content
+aws s3 ls s3://${S3_BUCKET}/raw/jobs/ --recursive --human-readable
+
+# 2. Check processed data exists
+aws s3 ls s3://${S3_BUCKET}/processed/ --recursive --human-readable
+
+# 3. Test Athena query
+aws athena start-query-execution \
+  --query-string "SELECT COUNT(*) FROM job_market_db.job_skills" \
+  --result-configuration "OutputLocation=s3://${S3_BUCKET}/athena-results/"
+
+# 4. Check ML models exist
+aws s3 ls s3://${S3_BUCKET}/models/skill_forecaster/
+```
+
+---
 
 ## Cost Estimate
 
 | Service | Monthly Est. |
 |---------|-------------|
 | S3 (10 GB) | $0.23 |
-| Lambda (1 000 runs) | $0.20 |
+| Lambda (1,000 runs) | $0.20 |
 | Glue (2 DPU-hr/day) | $13.20 |
 | Athena (10 GB/day) | $1.50 |
 | Secrets Manager | $0.40 |
@@ -267,3 +374,57 @@ Key test modules:
 | **Total** | **~$40/month** |
 
 QuickSight reader sessions are $0.30/session (pay-per-use) for shared dashboards.
+
+---
+
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           DATA INGESTION                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   ┌──────────────┐     ┌──────────────┐     ┌──────────────────────────┐   │
+│   │  Adzuna API  │     │  RemoteOK    │     │  Other Sources           │   │
+│   │  (Rate Ltd)  │     │  (Free)      │     │  (JSearch, Kaggle)       │   │
+│   └──────┬───────┘     └──────┬───────┘     └────────────┬─────────────┘   │
+│          │                    │                          │                  │
+│          ▼                    ▼                          ▼                  │
+│   ┌──────────────────────────────────────────────────────────────────┐     │
+│   │                    Lambda / CLI Scrapers                          │     │
+│   │                    (Transform → NDJSON/Parquet)                   │     │
+│   └──────────────────────────────┬───────────────────────────────────┘     │
+│                                  │                                          │
+└──────────────────────────────────┼──────────────────────────────────────────┘
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              S3 DATA LAKE                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   raw/jobs/source=adzuna/...     →  Glue ETL  →   processed/jobs/          │
+│                                                    processed/job_skills/    │
+│                                                                             │
+└─────────────────────────────────────┬───────────────────────────────────────┘
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    ▼                                   ▼
+┌───────────────────────────────────┐   ┌───────────────────────────────────┐
+│           ANALYTICS               │   │         MACHINE LEARNING          │
+├───────────────────────────────────┤   ├───────────────────────────────────┤
+│                                   │   │                                   │
+│   Athena (SQL Queries)            │   │   Feature Engineering             │
+│         │                         │   │         │                         │
+│         ▼                         │   │         ▼                         │
+│   QuickSight Dashboard            │   │   XGBoost / IsolationForest       │
+│   - Skill Trends                  │   │   - Demand Forecasting            │
+│   - Salary Analysis               │   │   - Emerging Skill Detection      │
+│   - Geographic Demand             │   │   - Skill Clustering              │
+│                                   │   │                                   │
+└───────────────────────────────────┘   └───────────────────────────────────┘
+```
+
+---
+
+## License
+
+MIT

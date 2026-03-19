@@ -42,28 +42,32 @@ def extract_skills(text):
 
 extract_skills_udf = F.udf(extract_skills, ArrayType(StringType()))
 
-# Read raw NDJSON
-raw_df = spark.read.json(f"s3://{S3_BUCKET}/raw/jobs/source=adzuna/")
+# Read raw data — supports both Parquet and JSON
+raw_path = f"s3://{S3_BUCKET}/raw/jobs/source=adzuna/"
+try:
+    raw_df = spark.read.parquet(raw_path)
+    print("Reading data as Parquet")
+except:
+    raw_df = spark.read.json(raw_path)
+    print("Reading data as JSON")
 
-# Some historical runs may not have a materialized job_id column.
-# In that case, synthesize a stable surrogate key so the job doesn't fail.
+print(f"Loaded {raw_df.count()} raw records")
+print(f"Columns: {raw_df.columns}")
+
+# Synthesize job_id if missing
 if "job_id" not in raw_df.columns:
-    concat_cols = F.concat_ws(
-        "||",
-        *[F.col(c).cast("string") for c in raw_df.columns]
-    )
+    concat_cols = F.concat_ws("||", *[F.col(c).cast("string") for c in raw_df.columns])
     raw_df = raw_df.withColumn("job_id", F.sha2(concat_cols, 256))
 
-# Choose an ordering column for deduplication, preferring ingested_at if present,
-# otherwise falling back to a generic date column if available.
+# Choose ordering column for deduplication
 if "ingested_at" in raw_df.columns:
     order_col = F.col("ingested_at").desc_nulls_last()
-elif "date" in raw_df.columns:
-    order_col = F.col("date").desc_nulls_last()
+elif "posted_date" in raw_df.columns:
+    order_col = F.col("posted_date").desc_nulls_last()
 else:
     order_col = F.lit(1)
 
-# Deduplicate (keep latest record per job_id based on chosen ordering)
+# Deduplicate (keep latest record per job_id)
 window = Window.partitionBy("job_id").orderBy(order_col)
 deduped_df = (
     raw_df
@@ -72,78 +76,88 @@ deduped_df = (
     .drop("rn")
 )
 
-# Transform with defensive handling for missing columns
 cols = set(deduped_df.columns)
 processed_df = deduped_df
 
-# Description and skills
+# --- Handle location flexibly (struct OR string) ---
+if "location" in cols:
+    # Check if location is a struct or string
+    location_type = str(deduped_df.schema["location"].dataType)
+    if "StructType" in location_type:
+        # Nested struct format (from JSON ingestion)
+        processed_df = processed_df.withColumn("location_display_name", F.col("location.display_name"))
+        processed_df = processed_df.withColumn("location_country", F.col("location.country"))
+    else:
+        # Flat string format (from Parquet ingestion)
+        processed_df = processed_df.withColumn("location_display_name", F.col("location"))
+        # Use existing country column if available
+        if "country" in cols:
+            processed_df = processed_df.withColumn("location_country", F.col("country"))
+        else:
+            processed_df = processed_df.withColumn("location_country", F.lit(None).cast(StringType()))
+else:
+    processed_df = processed_df.withColumn("location_display_name", F.lit(None).cast(StringType()))
+    processed_df = processed_df.withColumn("location_country", F.col("country") if "country" in cols else F.lit(None).cast(StringType()))
+
+# --- Handle description and skill extraction ---
 if "description" in cols:
     processed_df = processed_df.filter(F.col("description").isNotNull())
-    processed_df = processed_df.withColumn(
-        "extracted_skills", extract_skills_udf(F.col("description"))
-    )
+    # Check if skills already extracted
+    if "extracted_skills" in cols:
+        print("Using pre-extracted skills")
+    else:
+        processed_df = processed_df.withColumn("extracted_skills", extract_skills_udf(F.col("description")))
 else:
-    processed_df = processed_df.withColumn(
-        "description", F.lit(None).cast(StringType())
-    )
-    processed_df = processed_df.withColumn(
-        "extracted_skills", F.array().cast(ArrayType(StringType()))
-    )
+    processed_df = processed_df.withColumn("description", F.lit(None).cast(StringType()))
+    processed_df = processed_df.withColumn("extracted_skills", F.array().cast(ArrayType(StringType())))
 
-processed_df = processed_df.withColumn(
-    "skill_count", F.size(F.col("extracted_skills"))
-)
+# Ensure skill_count exists
+if "skill_count" not in processed_df.columns:
+    processed_df = processed_df.withColumn("skill_count", F.size(F.col("extracted_skills")))
 
-# Salary fields
+# --- Handle salary flexibly (struct OR flat columns) ---
 if "salary" in cols:
-    processed_df = processed_df.withColumn("salary_min_usd", F.col("salary.min"))
-    processed_df = processed_df.withColumn("salary_max_usd", F.col("salary.max"))
-    processed_df = processed_df.withColumn(
-        "salary_mid_usd",
-        (F.col("salary.min") + F.col("salary.max")) / 2,
-    )
+    salary_type = str(deduped_df.schema["salary"].dataType)
+    if "StructType" in salary_type:
+        processed_df = processed_df.withColumn("salary_min_usd", F.col("salary.min"))
+        processed_df = processed_df.withColumn("salary_max_usd", F.col("salary.max"))
+    else:
+        processed_df = processed_df.withColumn("salary_min_usd", F.col("salary").cast("double"))
+        processed_df = processed_df.withColumn("salary_max_usd", F.col("salary").cast("double"))
+elif "salary_min" in cols:
+    # Already flat columns
+    processed_df = processed_df.withColumn("salary_min_usd", F.col("salary_min"))
+    processed_df = processed_df.withColumn("salary_max_usd", F.col("salary_max"))
 else:
     processed_df = processed_df.withColumn("salary_min_usd", F.lit(None).cast("double"))
     processed_df = processed_df.withColumn("salary_max_usd", F.lit(None).cast("double"))
-    processed_df = processed_df.withColumn("salary_mid_usd", F.lit(None).cast("double"))
 
-# Posted date and partitions
+# Calculate midpoint
+processed_df = processed_df.withColumn(
+    "salary_mid_usd",
+    (F.col("salary_min_usd") + F.col("salary_max_usd")) / 2,
+)
+
+# --- Handle posted_date and partitions ---
 if "posted_date" in cols:
-    posted = F.to_date("posted_date")
+    processed_df = processed_df.withColumn("posted_date", F.to_date("posted_date"))
 elif "date" in cols:
-    posted = F.to_date("date")
+    processed_df = processed_df.withColumn("posted_date", F.to_date("date"))
 else:
-    posted = F.current_date()
+    processed_df = processed_df.withColumn("posted_date", F.current_date())
 
-processed_df = processed_df.withColumn("posted_date", posted)
 processed_df = processed_df.withColumn("year", F.year("posted_date"))
 processed_df = processed_df.withColumn("month", F.month("posted_date"))
 
-# Location helpers
-if "location" in cols:
-    processed_df = processed_df.withColumn(
-        "location_display_name", F.col("location.display_name")
-    )
-    processed_df = processed_df.withColumn(
-        "location_country", F.col("location.country")
-    )
-else:
-    processed_df = processed_df.withColumn(
-        "location_display_name", F.lit(None).cast(StringType())
-    )
-    processed_df = processed_df.withColumn(
-        "location_country", F.lit(None).cast(StringType())
-    )
-
-# Ensure optional top-level columns exist so selects don't fail
-for name, dtype in [
-    ("title", StringType()),
-    ("company", StringType()),
-    ("category", StringType()),
-    ("url", StringType()),
-]:
+# --- Ensure optional columns exist ---
+for name, dtype in [("title", StringType()), ("company", StringType()), 
+                    ("category", StringType()), ("url", StringType())]:
     if name not in processed_df.columns:
-        processed_df = processed_df.withColumn(name, F.lit(None).cast(dtype))
+        # Check for alternate column names
+        if name == "url" and "redirect_url" in processed_df.columns:
+            processed_df = processed_df.withColumn(name, F.col("redirect_url"))
+        else:
+            processed_df = processed_df.withColumn(name, F.lit(None).cast(dtype))
 
 # --- Write processed jobs table ---
 jobs_output = processed_df.select(
@@ -173,5 +187,7 @@ job_skills.write.mode("overwrite") \
     .partitionBy("year", "month") \
     .parquet(f"s3://{S3_BUCKET}/processed/job_skills/")
 
-print(f"Processed {jobs_output.count()} jobs")
+jobs_count = jobs_output.count()
+skills_count = job_skills.count()
+print(f"✅ Processed {jobs_count} jobs with {skills_count} skill records")
 job.commit()

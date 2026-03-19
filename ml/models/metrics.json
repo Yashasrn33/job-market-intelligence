@@ -1,145 +1,288 @@
 {
   "demand_model": {
-    "cv_mae_mean": 37.40938920676708,
-    "cv_mae_std": 14.944478560227328,
-    "cv_rmse_mean": 47.29306068695058,
-    "cv_r2_mean": -0.8920760650618405,
+    "cv_mae_mean": 13.974001896674514,
+    "cv_mae_std": 2.260009538368943,
+    "cv_rmse_mean": 23.39452974829483,
+    "cv_r2_mean": 0.17454138386745816,
     "top_features": [
       [
-        "salary_wow_growth",
-        0.1365841031074524
-      ],
-      [
-        "category_job_count",
-        0.12834063172340393
-      ],
-      [
         "job_count_ma_4w",
-        0.07867611944675446
-      ],
-      [
-        "market_share",
-        0.07420005649328232
+        0.19705542922019958
       ],
       [
         "job_count_ema_4w",
-        0.06544721126556396
+        0.17436353862285614
       ],
       [
-        "cv_8w",
-        0.057936232537031174
+        "job_count_ma_8w",
+        0.061072926968336105
+      ],
+      [
+        "job_count_ma_12w",
+        0.05070723593235016
+      ],
+      [
+        "market_share",
+        0.04194645956158638
+      ],
+      [
+        "category_job_count",
+        0.04003000631928444
       ],
       [
         "trend_strength_8w",
-        0.05130563676357269
+        0.03525732830166817
       ],
       [
-        "wow_growth",
-        0.04875227436423302
-      ],
-      [
-        "salary_ma_8w",
-        0.045020077377557755
+        "job_count_lag_2w",
+        0.03424622118473053
       ],
       [
         "job_count_std_8w",
-        0.044526126235723495
+        0.02928425371646881
+      ],
+      [
+        "salary_ma_4w",
+        0.024297526106238365
       ]
     ]
   },
   "emergence_model": {
-    "n_emerging_detected": 0,
-    "emerging_skills_sample": [],
-    "anomaly_threshold": 0.0
+    "n_emerging_detected": 26,
+    "emerging_skills_sample": [
+      "agile",
+      "angular",
+      "api",
+      "aws",
+      "azure",
+      "ci_cd",
+      "databricks",
+      "docker",
+      "gcp",
+      "golang"
+    ],
+    "anomaly_threshold": 1.0039712117215771e-16
   },
   "cluster_model": {
     "n_clusters": 8,
     "cluster_profiles": {
       "0": {
         "skills": [
-          "gcp",
-          "javascript",
+          "airflow",
+          "ansible",
+          "cloudformation",
+          "computer_vision",
+          "dynamodb",
+          "elasticsearch",
+          "fastapi",
+          "flask",
+          "git",
+          "github_actions",
+          "gitlab",
+          "helm",
           "jenkins",
-          "kafka",
-          "kubernetes",
-          "nodejs",
-          "typescript",
+          "langchain",
+          "natural_language_processing",
+          "php",
+          "pyspark",
+          "ruby",
+          "sagemaker",
+          "serverless",
+          "spark",
+          "spring",
           "vue"
         ],
-        "count": 8
+        "count": 23
       },
       "1": {
         "skills": [
-          "react"
+          "express",
+          "gcp",
+          "go",
+          "google_cloud",
+          "mongodb",
+          "mysql",
+          "oracle",
+          "postgresql",
+          "react",
+          "sql"
         ],
-        "count": 1
+        "count": 10
       },
       "2": {
-        "skills": [
-          "ci/cd",
-          "docker"
-        ],
-        "count": 2
-      },
-      "3": {
-        "skills": [
-          "python"
-        ],
-        "count": 1
-      },
-      "4": {
-        "skills": [
-          "angular"
-        ],
-        "count": 1
-      },
-      "5": {
         "skills": [
           "aws",
           "azure",
           "java",
-          "machine learning"
+          "machine_learning",
+          "python",
+          "r"
         ],
-        "count": 4
+        "count": 6
+      },
+      "3": {
+        "skills": [
+          "bash",
+          "bigquery",
+          "dbt",
+          "deep_learning",
+          "django",
+          "hadoop",
+          "hive",
+          "jira",
+          "kafka",
+          "kotlin",
+          "laravel",
+          "mlops",
+          "net",
+          "nlp",
+          "postgres",
+          "rails",
+          "redshift",
+          "rest",
+          "rust",
+          "scala",
+          "scrum",
+          "springboot",
+          "swift",
+          "unix"
+        ],
+        "count": 24
+      },
+      "4": {
+        "skills": [
+          "agile",
+          "api",
+          "ci_cd",
+          "databricks",
+          "docker",
+          "golang",
+          "javascript",
+          "kubernetes",
+          "lambda",
+          "linux",
+          "llm",
+          "microservices",
+          "node",
+          "nodejs",
+          "snowflake",
+          "sql_server",
+          "typescript"
+        ],
+        "count": 17
+      },
+      "5": {
+        "skills": [
+          "openai",
+          "pytorch",
+          "tensorflow"
+        ],
+        "count": 3
       },
       "6": {
         "skills": [
-          "fastapi",
-          "spark"
+          "graphql",
+          "terraform"
         ],
         "count": 2
       },
       "7": {
         "skills": [
-          "go"
+          "angular"
         ],
         "count": 1
       }
     },
     "skill_cluster_mapping": {
-      "angular": 4,
-      "aws": 5,
-      "azure": 5,
-      "ci/cd": 2,
-      "docker": 2,
-      "fastapi": 6,
-      "gcp": 0,
-      "go": 7,
-      "java": 5,
-      "javascript": 0,
+      "agile": 4,
+      "airflow": 0,
+      "angular": 7,
+      "ansible": 0,
+      "api": 4,
+      "aws": 2,
+      "azure": 2,
+      "bash": 3,
+      "bigquery": 3,
+      "ci_cd": 4,
+      "cloudformation": 0,
+      "computer_vision": 0,
+      "databricks": 4,
+      "dbt": 3,
+      "deep_learning": 3,
+      "django": 3,
+      "docker": 4,
+      "dynamodb": 0,
+      "elasticsearch": 0,
+      "express": 1,
+      "fastapi": 0,
+      "flask": 0,
+      "gcp": 1,
+      "git": 0,
+      "github_actions": 0,
+      "gitlab": 0,
+      "go": 1,
+      "golang": 4,
+      "google_cloud": 1,
+      "graphql": 6,
+      "hadoop": 3,
+      "helm": 0,
+      "hive": 3,
+      "java": 2,
+      "javascript": 4,
       "jenkins": 0,
-      "kafka": 0,
-      "kubernetes": 0,
-      "machine learning": 5,
-      "nodejs": 0,
-      "python": 3,
+      "jira": 3,
+      "kafka": 3,
+      "kotlin": 3,
+      "kubernetes": 4,
+      "lambda": 4,
+      "langchain": 0,
+      "laravel": 3,
+      "linux": 4,
+      "llm": 4,
+      "machine_learning": 2,
+      "microservices": 4,
+      "mlops": 3,
+      "mongodb": 1,
+      "mysql": 1,
+      "natural_language_processing": 0,
+      "net": 3,
+      "nlp": 3,
+      "node": 4,
+      "nodejs": 4,
+      "openai": 5,
+      "oracle": 1,
+      "php": 0,
+      "postgres": 3,
+      "postgresql": 1,
+      "pyspark": 0,
+      "python": 2,
+      "pytorch": 5,
+      "r": 2,
+      "rails": 3,
       "react": 1,
-      "spark": 6,
-      "typescript": 0,
+      "redshift": 3,
+      "rest": 3,
+      "ruby": 0,
+      "rust": 3,
+      "sagemaker": 0,
+      "scala": 3,
+      "scrum": 3,
+      "serverless": 0,
+      "snowflake": 4,
+      "spark": 0,
+      "spring": 0,
+      "springboot": 3,
+      "sql": 1,
+      "sql_server": 4,
+      "swift": 3,
+      "tensorflow": 5,
+      "terraform": 6,
+      "typescript": 4,
+      "unix": 3,
       "vue": 0
     }
   },
-  "n_samples": 97,
-  "n_skills": 20,
+  "n_samples": 735,
+  "n_skills": 86,
   "n_features": 32
 }
