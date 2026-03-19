@@ -12,7 +12,9 @@ xgboost>=2.0.0
 # Data Ingestion
 tenacity>=8.2.0
 
-# Visualization (QuickSight — managed via AWS, no Python deps needed)
+# Visualization
+streamlit>=1.30.0
+plotly>=5.18.0
 
 # AWS Data Tools
 awswrangler>=3.4.0

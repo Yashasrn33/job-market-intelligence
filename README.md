@@ -53,6 +53,10 @@ job-market-intelligence/
 │   └── inference/
 │       └── predictor.py
 │
+├── dashboard/                     # Streamlit Dashboard
+│   ├── app.py                   # Main dashboard (6 pages)
+│   └── data_loader.py           # AWS / demo data loader
+│
 ├── visualization/                 # QuickSight Dashboard
 │   └── quicksight/
 │       └── athena_views.sql      # Athena views powering QuickSight datasets
@@ -268,7 +272,34 @@ This creates:
 | `jmi-dashboard-kpis` | KPI widgets (total_jobs, unique_skills, avg_salary) |
 | `jmi-skills-by-category` | Pie or treemap (category x job_count) |
 
-### 8. Run Tests
+### 8. Streamlit Dashboard (Local Visualization)
+
+A full-featured Streamlit dashboard that mirrors (and extends) the QuickSight visuals — runs locally with no AWS dependency.
+
+```bash
+# Install deps (if not already)
+pip install -r requirements.txt
+
+# Launch the dashboard
+streamlit run dashboard/app.py
+```
+
+The dashboard auto-detects AWS credentials. If none are found it runs in **demo mode** with realistic synthetic data, so you can explore the UI immediately.
+
+**Pages:**
+
+| Page | What it shows |
+|------|--------------|
+| **Overview** | KPI cards, top skills bar, category treemap, weekly trends |
+| **Skill Demand** | Sortable skill rankings, demand by country, trend comparison |
+| **Salary Analysis** | Salary by country, salary vs demand scatter, distribution box plots |
+| **Growth & Forecasting** | Growth rates, current vs forecast, emerging skills scatter + table |
+| **Skill Relationships** | Co-occurrence heatmap, top pairs, cluster-based recommendations |
+| **ML Insights** | Model metrics, feature importance, cluster composition explorer |
+
+Sidebar filters (category, country) apply across all pages.
+
+### 9. Run Tests
 
 ```bash
 pytest -q          # all tests
