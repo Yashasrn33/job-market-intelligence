@@ -427,113 +427,59 @@ def page_salary_analysis():
 def page_growth():
     st.header("Growth & Forecasting")
 
-    growth = data["skill_growth"].copy()
     emerging = data["emerging_skills"].copy()
 
-    tab_growth, tab_emerging = st.tabs(["Skill Growth", "Emerging Skills"])
+    st.subheader("Emerging Skills Detection")
 
-    with tab_growth:
-        st.subheader("Skill Growth Rates")
-        if selected_categories:
-            growth = growth[growth["skill"].apply(_get_category).isin(selected_categories)]
+    if selected_categories:
+        emerging = emerging[emerging["skill"].apply(_get_category).isin(selected_categories)]
 
-        growth_sorted = growth.sort_values("growth_pct", ascending=True).tail(30)
-        fig = px.bar(
-            growth_sorted,
-            x="growth_pct", y="skill",
-            color="trend_status",
-            color_discrete_map=TREND_COLORS,
-            orientation="h",
-            hover_data={
-                "total_jobs": ":,.0f",
-                "avg_weekly_jobs": ":.1f",
-                "forecast_weekly": ":.1f",
-            },
-        )
-        fig.update_layout(
-            height=max(400, len(growth_sorted) * 22),
-            xaxis_title="Growth %",
-            yaxis_title=None,
-            legend_title="Trend",
-            margin=dict(l=0, r=0, t=10, b=0),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    if emerging.empty:
+        st.warning("No emerging skills found for the selected filters.")
+        return
 
-        st.divider()
-        st.subheader("Current vs Forecast Demand")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Emerging Skills", len(emerging[emerging["trend_status"].isin(["Hot", "Rising"])]))
+    c2.metric("Highest Growth", f"{emerging['growth_pct'].max():.0f}%")
+    c3.metric("Top Emerging", emerging.iloc[0]["skill"] if len(emerging) > 0 else "N/A")
 
-        forecast_df = growth[growth["forecast_weekly"] > 0].nlargest(20, "total_jobs")
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            name="Current (Avg Weekly)",
-            y=forecast_df["skill"],
-            x=forecast_df["avg_weekly_jobs"],
-            orientation="h",
-            marker_color="#6366f1",
-        ))
-        fig.add_trace(go.Bar(
-            name="Forecast (Weekly)",
-            y=forecast_df["skill"],
-            x=forecast_df["forecast_weekly"],
-            orientation="h",
-            marker_color="#22c55e",
-        ))
-        fig.update_layout(
-            barmode="group", height=500,
-            xaxis_title="Weekly Jobs", yaxis_title=None,
-            margin=dict(l=0, r=0, t=10, b=0),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    fig = px.scatter(
+        emerging,
+        x="current_jobs", y="growth_pct",
+        size="current_jobs", color="trend_status",
+        color_discrete_map=TREND_COLORS,
+        text="skill",
+        hover_data={"avg_salary": ":$,.0f", "prev_jobs": True},
+    )
+    fig.update_traces(textposition="top center", textfont_size=9)
+    fig.update_layout(
+        height=500,
+        xaxis_title="Current Job Count (last 4 weeks)",
+        yaxis_title="Growth % (vs prior 4 weeks)",
+        margin=dict(l=0, r=0, t=10, b=0),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-    with tab_emerging:
-        st.subheader("Emerging Skills Detection")
-
-        if selected_categories:
-            emerging = emerging[emerging["skill"].apply(_get_category).isin(selected_categories)]
-
-        if emerging.empty:
-            st.warning("No emerging skills found for the selected filters.")
-        else:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Emerging Skills", len(emerging[emerging["trend_status"].isin(["Hot", "Rising"])]))
-            c2.metric("Highest Growth", f"{emerging['growth_pct'].max():.0f}%")
-            c3.metric("Top Emerging", emerging.iloc[0]["skill"] if len(emerging) > 0 else "N/A")
-
-            fig = px.scatter(
-                emerging,
-                x="current_jobs", y="growth_pct",
-                size="current_jobs", color="trend_status",
-                color_discrete_map=TREND_COLORS,
-                text="skill",
-                hover_data={"avg_salary": ":$,.0f", "prev_jobs": True},
-            )
-            fig.update_traces(textposition="top center", textfont_size=9)
-            fig.update_layout(
-                height=500,
-                xaxis_title="Current Job Count (last 4 weeks)",
-                yaxis_title="Growth % (vs prior 4 weeks)",
-                margin=dict(l=0, r=0, t=10, b=0),
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.divider()
-            st.subheader("Emerging Skills Table")
-            display_cols = ["skill", "current_jobs", "prev_jobs", "growth_pct", "avg_salary", "trend_status"]
-            available = [c for c in display_cols if c in emerging.columns]
-            styled = emerging[available].reset_index(drop=True)
-            st.dataframe(
-                styled,
-                use_container_width=True,
-                column_config={
-                    "skill": st.column_config.TextColumn("Skill"),
-                    "current_jobs": st.column_config.NumberColumn("Current Jobs"),
-                    "prev_jobs": st.column_config.NumberColumn("Prev Jobs"),
-                    "growth_pct": st.column_config.NumberColumn("Growth %", format="%.1f%%"),
-                    "avg_salary": st.column_config.NumberColumn("Avg Salary", format="$%,.0f"),
-                    "trend_status": st.column_config.TextColumn("Trend"),
-                },
-                hide_index=True,
-            )
+    st.divider()
+    st.subheader("Emerging Skills Table")
+    display_cols = ["skill", "current_jobs", "prev_jobs", "growth_pct", "avg_salary", "trend_status"]
+    available = [c for c in display_cols if c in emerging.columns]
+    styled = emerging[available].reset_index(drop=True)
+    if "avg_salary" in styled.columns:
+        styled["avg_salary"] = styled["avg_salary"].apply(fmt_salary)
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        column_config={
+            "skill": st.column_config.TextColumn("Skill"),
+            "current_jobs": st.column_config.NumberColumn("Current Jobs"),
+            "prev_jobs": st.column_config.NumberColumn("Prev Jobs"),
+            "growth_pct": st.column_config.NumberColumn("Growth %", format="%.1f%%"),
+            "avg_salary": st.column_config.TextColumn("Avg Salary"),
+            "trend_status": st.column_config.TextColumn("Trend"),
+        },
+        hide_index=True,
+    )
 
 
 # ── page: skill relationships ───────────────────────────────────────────────
@@ -543,7 +489,7 @@ def page_relationships():
 
     cooc = data["cooccurrence"].copy()
 
-    tab_heat, tab_network, tab_recs = st.tabs(["Co-occurrence Heatmap", "Top Pairs", "Skill Recommendations"])
+    tab_heat, tab_network = st.tabs(["Co-occurrence Heatmap", "Top Pairs"])
 
     with tab_heat:
         st.subheader("Skill Co-occurrence Matrix")
@@ -618,77 +564,6 @@ def page_relationships():
             margin=dict(l=0, r=0, t=10, b=0),
         )
         st.plotly_chart(fig, use_container_width=True)
-
-    with tab_recs:
-        st.subheader("Skill Recommendations")
-        st.write("Select skills you already know to discover related skills.")
-
-        metrics = data["model_metrics"]
-        cluster_mapping = metrics.get("cluster_model", {}).get("skill_cluster_mapping", {})
-
-        if not cluster_mapping:
-            st.warning("No cluster model available. Train the ML models first.")
-        else:
-            all_skills = sorted(cluster_mapping.keys())
-            known = st.multiselect(
-                "Your current skills",
-                all_skills,
-                default=["python", "aws"] if "python" in all_skills else all_skills[:2],
-            )
-
-            if known:
-                known_clusters = {cluster_mapping[s] for s in known if s in cluster_mapping}
-                recs = []
-                for skill, cluster in cluster_mapping.items():
-                    if cluster in known_clusters and skill not in known:
-                        recs.append({"skill": skill, "cluster": cluster})
-
-                if recs:
-                    recs_df = pd.DataFrame(recs)
-                    recs_df["category"] = recs_df["skill"].apply(_get_category)
-
-                    growth = data["skill_growth"]
-                    recs_df = recs_df.merge(
-                        growth[["skill", "growth_pct", "avg_weekly_jobs", "trend_status"]],
-                        on="skill", how="left",
-                    )
-
-                    recs_df = recs_df.sort_values("growth_pct", ascending=False).head(15)
-
-                    st.write(f"Based on your skills, you belong to **{len(known_clusters)} skill cluster(s)**. "
-                             f"Here are **{len(recs_df)} recommended skills** to learn:")
-
-                    fig = px.bar(
-                        recs_df.sort_values("growth_pct"),
-                        x="growth_pct", y="skill",
-                        color="category",
-                        color_discrete_map=CATEGORY_COLORS,
-                        orientation="h",
-                        hover_data={"avg_weekly_jobs": ":.1f"},
-                    )
-                    fig.update_layout(
-                        height=max(350, len(recs_df) * 28),
-                        xaxis_title="Growth %", yaxis_title=None,
-                        legend_title="Category",
-                        margin=dict(l=0, r=0, t=10, b=0),
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
-                    st.dataframe(
-                        recs_df[["skill", "category", "growth_pct", "avg_weekly_jobs", "trend_status"]].reset_index(drop=True),
-                        use_container_width=True,
-                        column_config={
-                            "skill": "Skill",
-                            "category": "Category",
-                            "growth_pct": st.column_config.NumberColumn("Growth %", format="%.1f%%"),
-                            "avg_weekly_jobs": st.column_config.NumberColumn("Avg Weekly Jobs", format="%.1f"),
-                            "trend_status": "Trend",
-                        },
-                        hide_index=True,
-                    )
-                else:
-                    st.info("No additional recommendations found for the selected skills.")
-
 
 # ── page: ML insights ───────────────────────────────────────────────────────
 
